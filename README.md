@@ -127,7 +127,7 @@ dsh plugin --profile web remove dsh-splash-animation
 
 字段填写有误只会退回默认值，不会导致启动失败。
 
-### 素材文件夹、打勾与随机播放（本机加装）
+### 素材文件夹、打勾与随机播放（本仓库新增）
 
 原本只能指定**一个**视频路径。现在改成指定**一个文件夹**，插件列出里面所有能播的视频与动图，**打勾**决定哪些参与，开屏时从打勾的里面随机挑一个。
 
@@ -151,20 +151,20 @@ dsh plugin --profile web remove dsh-splash-animation
 
 设置页里有「刷新」按钮：往文件夹里丢进新文件后不用重启。
 
-### 跳过方式（本机加装）
+### 跳过方式（本仓库新增）
 
-`skip` 沿用上游的取值，这里说明本机默认用哪个以及为什么：
+`skip` 沿用上游的取值，这里说明本仓库默认用哪个以及为什么：
 
 | 值 | 行为 |
 | --- | --- |
 | `button` | 上游默认：右下角一个「跳过」按钮 |
-| `click` | **本机在用的**：点画面任意位置跳过，底部只留一条淡色提示 |
+| `click` | **本仓库默认**：点画面任意位置跳过，底部只留一条淡色提示 |
 | `auto` | `skipAfterMs` 之后自动跳过 |
 | `never` | 不能跳过 |
 
 提示条的做法：贴底整宽、居中、`opacity: 0.42`、无边框，配一层从底部向上渐隐的极淡黑（而不是实心条），并且设了 `pointer-events: none`——否则它横在底部会把"点击任意位置"的那次点击自己吃掉。
 
-### 片尾交叉溶解（本机加装）
+### 片尾交叉溶解（本仓库新增）
 
 默认行为是**先播完、再淡出**：影片停在最后一帧，`holdAfterEndMs` 之后开始渐隐，渐隐用掉 `fadeOutMs`——也就是说界面要等到影片结束后再过 `fadeOutMs` 才完全露出来。
 
@@ -191,7 +191,7 @@ dsh plugin --profile web remove dsh-splash-animation
 
 留着只会让人以为开了有用。同类需求请用下面的 `startMaximized`，它是真的能工作的。
 
-### 启动默认最大化（本机加装）
+### 启动默认最大化（本仓库新增）
 
 打开 `startMaximized` 后，**应用启动时**把 DSH 窗口最大化。它不还原——最大化是你要的最终状态，不是开屏期间的临时状态。
 
@@ -271,17 +271,17 @@ dsh plugin --profile web add github:KDDKBD/DeepSeek-splash-animation
 
 ## 致谢与来源
 
-这个仓库是 **`KDDKBD/DeepSeek-splash-animation` 的本地改动版（fork）**，不是从零写的。原作者的框架、客户端模块形态、媒体解析与 Range 流式传输、以及自带的那段默认视频，都是本仓库的地基。
+这个仓库是 **`KDDKBD/DeepSeek-splash-animation` 的改动版（fork）**，不是从零写的。原作者的框架、客户端模块形态、媒体解析与 Range 流式传输、以及自带的那段默认视频，都是本仓库的地基。
 
 | 项目 | 作者 / 来源 | 许可证 | 本仓库用到什么 |
 | --- | --- | --- | --- |
 | [KDDKBD/DeepSeek-splash-animation](https://github.com/KDDKBD/DeepSeek-splash-animation) | KDDKBD 及贡献者 | MIT | **上游本体**：本仓库是它的 fork，保留其全部版权声明 |
-| [lxj5820/dsh-boot-animation](https://github.com/lxj5820/dsh-boot-animation) | lxj5820 及贡献者 | MIT | **参考**：另一套开屏/开机动画插件的实现，本机改造时对照过它的做法；本机素材文件夹里的三段演示片段也取自那里（见下） |
+| [lxj5820/dsh-boot-animation](https://github.com/lxj5820/dsh-boot-animation) | lxj5820 及贡献者 | MIT | **参考**：另一套开屏/开机动画插件的实现，本仓库改造时对照过它的做法；本机素材文件夹里的三段演示片段也取自那里（见下） |
 
 ### 素材声明
 
 - 仓库内 `assets/` 下的 `default.mp4`、`fit-compare.png`、`screenshot-splash.png` 是**上游自带**的文件，随上游的 MIT 许可一起分发。
-- 本机素材文件夹里的三段演示片段（`开机动画*.mp4`）来自 `lxj5820/dsh-boot-animation`，**不包含在本仓库里**，仅作为本地测试素材。
+- 三段演示片段（`开机动画*.mp4`）来自 `lxj5820/dsh-boot-animation`，**不包含在本仓库里**，仅在本地测试时使用。
 - 任何用户自己放进素材文件夹的视频（例如游戏或影视片段）**都不属于本仓库**，也不应随本仓库分发——那类素材的著作权属于原权利人。
 
 ### 与上游的关系
