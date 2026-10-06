@@ -1016,6 +1016,11 @@ function pickViaPowerShell(ctx, initial, mode = 'file') {
     '-InitialDirectory', startDir,
     '-InitialFile', startFile,
     '-Mode', mode,
+    // The title carries the localized text because the script must stay pure
+    // ASCII: Windows PowerShell decodes a BOM-less script as ANSI, so a Chinese
+    // string literal in it is read as the wrong bytes and the script fails to
+    // parse. Node is UTF-8 clean, so the string travels safely as an argument.
+    '-Title', mode === 'folder' ? '选择素材文件夹' : '选择视频或动图',
   ], ctx).then((output) => {
     if (output === undefined) return undefined
     // The chosen path travels through a UTF-8 FILE, not stdout: a console encodes
