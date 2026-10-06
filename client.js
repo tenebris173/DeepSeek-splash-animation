@@ -11,7 +11,8 @@
  *   - `shell.overlay` — the splash itself, and ONLY when a video is configured.
  *     With no video the plugin registers nothing here, so DSH behaves exactly as
  *     if it were not installed.
- *   - `settings.plugins.tab` — the settings page that chooses the video.
+ *   - `settings.section` — the settings page that chooses the video, as its own
+ *     entry in the settings sidebar rather than a tab under the official plugin list.
  *
  * Host endpoints (absolute, so the same strings work in the browser and under
  * Electron, where the preload bridge forwards absolute-path requests):
@@ -132,8 +133,17 @@ window.__ModuleLoader__.load({
     const CONFIG_URL = `${BASE}/config.json`
     const SAVE_URL = `${BASE}/config`
     const PICK_URL = `${BASE}/pick`
+    /**
+     * Where the overlay reports its own lifetime.
+     *
+     * Fullscreen is the Host's job — `Element.requestFullscreen()` needs a
+     * transient user activation, and a splash runs before the user has touched
+     * anything — so this half only says "the splash is up" and "the splash is
+     * gone", and the Host resizes the desktop window in between.
+     */
+    const SPLASH_URL = `${BASE}/splash`
     const OVERLAY_SLOT = 'shell.overlay'
-    const TAB_SLOT = 'settings.plugins.tab'
+    const SECTION_SLOT = 'settings.section'
     const ROW_ID = 'dsh-splash-animation'
 
     /** UI strings; the splash is the first thing a user sees, so it follows the OS language. */
@@ -142,9 +152,22 @@ window.__ModuleLoader__.load({
         tab: '开屏动画',
         title: '开屏动画',
         intro: '选一个视频或动图，下次打开 DSH 时会先播它，并在结尾淡出。没有选择时插件完全不生效。',
-        pathLabel: '视频 / 动图路径',
-        pathPlaceholder: '例如 D:\\videos\\opening.mp4，或 ~/videos/opening.webm',
-        choose: '选择文件…',
+        folderLabel: '素材文件夹',
+        folderPlaceholder: '例如 C:\\Users\\你的用户名\\.dsh\\dsh-splash-animation\\media',
+        libraryLabel: '文件夹里的素材',
+        libraryEmpty: '这个文件夹里没有可播放的视频或动图。把文件放进去，再点「刷新」。',
+        libraryHint: '打勾的会参与开屏播放；一个都不打勾就不播，DSH 直接启动。点整行即可切换。',
+        libraryCount: (picked, total) => `已勾选 ${picked} / 共 ${total}`,
+        kindVideo: '视频',
+        kindImage: '动图',
+        reloadLibrary: '刷新',
+        tailLabel: '片尾交叉溶解',
+        tailHint: '开启后，淡出在影片结束前 fadeOutMs 就开始，影片还在演的时候界面已在下面透出来，交接正好落在最后一帧。关闭维持原样：整段播完、停在最后一帧，再淡出（两者之间可留 holdAfterEndMs）。影片设为重复播放时本项不生效，避免截断重播。',
+        randomLabel: '随机播放',
+        randomHint: '开启后，每次启动从上面的清单里随机挑一个。挑中的文件如果不存在、或者格式不支持，会自动跳过它换下一个，不会因为一条坏路径就不播；清单为空时等于关闭。',
+        maximizedLabel: '启动默认最大化',
+        maximizedHint: '开启后，应用启动时把 DSH 窗口最大化。一次进程只做一次：之后刷新页面不会再把窗口弹回最大化，所以你手动还原窗口是安全的；窗口已经最大化时不做任何事。仅限 Windows 桌面端 —— 插件宿主是与 Electron 分离的独立进程，拿不到窗口对象，只能从系统层面驱动窗口。',
+        choose: '选择文件夹…',
         save: '保存',
         clear: '清除',
         saved: '已保存。下次打开或刷新 DSH 时生效。',
@@ -159,6 +182,7 @@ window.__ModuleLoader__.load({
         size: '大小',
         summary: '影片信息',
         skip: '跳过',
+        skipClick: '点击任意位置跳过',
         problem: {
           'unsupported-format': '这个扩展名不在支持列表里。',
           'missing-file': '找不到这个文件。',
@@ -173,9 +197,22 @@ window.__ModuleLoader__.load({
         tab: 'Splash animation',
         title: 'Splash animation',
         intro: 'Pick a video or animated image. It plays the next time DSH opens and fades out at the end. With nothing selected the plugin does not engage at all.',
-        pathLabel: 'Video / image path',
-        pathPlaceholder: 'e.g. D:\\videos\\opening.mp4, or ~/videos/opening.webm',
-        choose: 'Choose file…',
+        folderLabel: 'Media folder',
+        folderPlaceholder: 'e.g. C:\\Users\\you\\.dsh\\dsh-splash-animation\\media',
+        libraryLabel: 'Files in the folder',
+        libraryEmpty: 'No playable video or image in this folder. Put files there and press Refresh.',
+        libraryHint: 'Ticked files take part in the splash; ticking none plays nothing and DSH starts normally. Click a row to toggle it.',
+        libraryCount: (picked, total) => `${picked} of ${total} ticked`,
+        kindVideo: 'video',
+        kindImage: 'image',
+        reloadLibrary: 'Refresh',
+        tailLabel: 'Tail cross-dissolve',
+        tailHint: 'On, the dissolve starts fadeOutMs before the clip ends, so the clip is still playing while the interface comes through underneath and the hand-off lands on the last frame. Off keeps the previous behaviour: the clip plays out in full, holds its last frame, then dissolves (holdAfterEndMs is the gap). Has no effect while the clip repeats, which would otherwise be cut short.',
+        randomLabel: 'Play at random',
+        randomHint: 'On, each start picks one entry from the list above. An entry that is missing or unsupported is skipped for the next one rather than stopping playback, and an empty list behaves as off.',
+        maximizedLabel: 'Maximize on start-up',
+        maximizedHint: 'On, the DSH window is maximized when the application starts. Once per process: a later page reload never snaps a window you restored back to maximized, and a window already maximized is left alone. Windows desktop only — the plugin Host is a separate process with no Electron access, so the window is driven from the OS side.',
+        choose: 'Choose folder…',
         save: 'Save',
         clear: 'Clear',
         saved: 'Saved. It takes effect the next time DSH opens or the page reloads.',
@@ -190,6 +227,7 @@ window.__ModuleLoader__.load({
         size: 'Size',
         summary: 'Media',
         skip: 'Skip',
+        skipClick: 'Click anywhere to skip',
         problem: {
           'unsupported-format': 'That extension is not in the supported list.',
           'missing-file': 'That file was not found.',
@@ -274,6 +312,10 @@ window.__ModuleLoader__.load({
       waitForAppMs: 2500,
       holdAfterEndMs: 0,
       maxReplays: 0,
+      // Off is the historical behaviour: play the clip in full, then dissolve.
+      tailDissolve: false,
+      // Off: the window keeps whatever size and position the user left it at.
+      startMaximized: false,
     }
 
     /** @returns `value` when it is a usable number, else `fallback`. */
@@ -312,6 +354,91 @@ window.__ModuleLoader__.load({
       // time and is the primary exit rather than a rescue.
       if (settings.duration > 0 && settings.duration < lengthSeconds * 1000) return settings.duration
       return lengthSeconds * 1000 + FALLBACK_SLACK_MS
+    }
+
+    /**
+     * Wall-clock milliseconds from playback start until the tail dissolve must
+     * begin, so that the dissolve finishes exactly as the clip ends.
+     *
+     * "The end" is whichever exit governs, resolved exactly as {@link fadeDelayFor}
+     * resolves it: an explicit `duration` shorter than the clip is a deliberate
+     * cut and is the end, otherwise the clip's own length is. Media time advances
+     * at `playbackRate`, so the wall-clock deadline is the media deadline divided
+     * by the rate — at 2x the dissolve has to start at half the elapsed time.
+     *
+     * `fadeOutMs` is the whole span of the dissolve, so subtracting it is what
+     * makes the interface fully revealed on the clip's last frame rather than
+     * `fadeOutMs` after it.
+     * @param lengthSeconds - the media length in seconds, or `NaN` when unknown.
+     * @param settings - the effective settings.
+     * @returns the delay in milliseconds, never negative.
+     */
+    function tailDissolveDelayFor(lengthSeconds, settings) {
+      const known = typeof lengthSeconds === 'number' && Number.isFinite(lengthSeconds) && lengthSeconds > 0
+      if (!known) return 0
+      const mediaEndMs = settings.duration > 0 && settings.duration < lengthSeconds * 1000
+        ? settings.duration
+        : lengthSeconds * 1000
+      const rate = num(settings.playbackRate, 1)
+      const speed = rate > 0 ? rate : 1
+      return Math.max(0, mediaEndMs / speed - num(settings.fadeOutMs, FALLBACK.fadeOutMs))
+    }
+
+    /**
+     * What to assume when a clip's length is not known yet.
+     *
+     * The metadata that would answer loads after the effect that needs the number
+     * runs, so the unknown case is deliberately generous: this value is only an
+     * upper bound for the Host's safety release, and the real release is the
+     * `end` report. Overestimating costs a slower rescue after a client that died
+     * mid-splash; underestimating would drop the window out of fullscreen while
+     * the clip is still playing.
+     */
+    const SPLASH_LENGTH_ASSUMPTION_MS = 60000
+
+    /**
+     * Upper bound, in milliseconds, on how long one splash will occupy the screen.
+     *
+     * Mirrors how the player itself resolves the end: an explicit `duration` is a
+     * deliberate cut and wins, otherwise the clip's own length does, and either is
+     * scaled by `playbackRate` because media time is not wall-clock time. Repeats
+     * multiply the play time; the fades and the post-end hold are added once.
+     * @param settings - the effective settings.
+     * @param durationSeconds - the media length in seconds, or anything unusable.
+     * @returns the bound in milliseconds.
+     */
+    function splashLifetimeMs(settings, durationSeconds) {
+      const rate = num(settings.playbackRate, 1) > 0 ? num(settings.playbackRate, 1) : 1
+      const cap = num(settings.duration, 0)
+      const length = typeof durationSeconds === 'number' && Number.isFinite(durationSeconds) && durationSeconds > 0
+        ? durationSeconds
+        : 0
+      const playedMs = cap > 0 ? cap : length > 0 ? (length * 1000) / rate : SPLASH_LENGTH_ASSUMPTION_MS
+      const passes = 1 + Math.max(0, num(settings.maxReplays, 0))
+      return playedMs * passes
+        + num(settings.fadeInMs, FALLBACK.fadeInMs)
+        + num(settings.fadeOutMs, FALLBACK.fadeOutMs)
+        + num(settings.holdAfterEndMs, FALLBACK.holdAfterEndMs)
+        + 2000
+    }
+
+    /**
+     * Fire-and-forget POST. A splash never waits on the network: the reply only
+     * reports what the Host could do, and nothing in the overlay depends on it.
+     * @param url - the endpoint.
+     * @param body - the JSON body.
+     */
+    function report(url, body) {
+      try {
+        void fetch(url, {
+          method: 'POST',
+          credentials: 'same-origin',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        }).catch(() => {})
+      } catch {
+        // A splash that cannot report is still a splash.
+      }
     }
 
     /** @returns the CSS `object-fit` keyword for the `fit` setting. */
@@ -506,6 +633,8 @@ window.__ModuleLoader__.load({
 
         /** The countdown that starts the fade once the video has played out. */
         let fadeTimer
+        /** The countdown that starts the fade *before* the clip ends (tail mode). */
+        let tailTimer
 
         if (media.kind === 'video') {
           const element = videoRef.current
@@ -545,8 +674,35 @@ window.__ModuleLoader__.load({
             fadeTimer = after(fadeDelayFor(element.duration, settings), dismiss)
           }
 
+          /**
+           * Arm the tail cross-dissolve.
+           *
+           * Off (the default) this does nothing and the splash keeps the historical
+           * lifecycle: the clip plays out in full, then the overlay dissolves. On,
+           * the dissolve is scheduled to *start* `fadeOutMs` before the clip ends,
+           * so the clip is still visibly playing while the interface comes through
+           * underneath and the hand-off lands on the last frame.
+           *
+           * Re-armed from `loadedmetadata`/`durationchange` for the same reason the
+           * rescue timer is: the length is unknown before them, and a delay computed
+           * from an unknown length is a truncation. `ended` stays registered, so a
+           * deadline that never arrives (a clip whose clock stalls) still exits.
+           *
+           * Deliberately inert while `maxReplays > 0`: dissolving before the end of
+           * the *first* pass would cut the repeats the user asked for short, and the
+           * repeat count is only known as each pass ends.
+           */
+          const armTail = () => {
+            if (tailTimer !== undefined) window.clearTimeout(tailTimer)
+            if (settings.tailDissolve !== true) return
+            if (num(settings.maxReplays, 0) > 0) return
+            tailTimer = after(tailDissolveDelayFor(element.duration, settings), dismiss)
+          }
+
           element.addEventListener('loadedmetadata', armFallback)
           element.addEventListener('durationchange', armFallback)
+          element.addEventListener('loadedmetadata', armTail)
+          element.addEventListener('durationchange', armTail)
 
           const started = element.play()
           if (started !== undefined && typeof started.catch === 'function') {
@@ -598,6 +754,8 @@ window.__ModuleLoader__.load({
             clearAll()
             element.removeEventListener('loadedmetadata', armFallback)
             element.removeEventListener('durationchange', armFallback)
+            element.removeEventListener('loadedmetadata', armTail)
+            element.removeEventListener('durationchange', armTail)
             element.removeEventListener('ended', onEnded)
             element.removeEventListener('error', onError)
             element.removeEventListener('loadeddata', onPaintable)
@@ -727,32 +885,48 @@ window.__ModuleLoader__.load({
       }
 
       if (settings.skip !== 'never' && settings.skip !== 'auto') {
-        children.push(React.createElement('button', {
+        // One faint line across the bottom, not a pill in the corner: it is a
+        // hint about a gesture, and a control competing with the clip for
+        // attention is the wrong shape for that.
+        const clickOnly = settings.skip === 'click'
+        children.push(React.createElement(clickOnly ? 'div' : 'button', {
           key: 'skip',
-          type: 'button',
+          ...clickOnly ? { 'aria-hidden': true } : { type: 'button' },
           // The marker is what the window-level capture listener looks for; it cannot
           // rely on this element's own React handler, because a click here is claimed
-          // by another plugin before it can reach the button. See the effect above.
+          // by another plugin before it can reach the element. See the effect above.
           'data-dsh-splash-skip': '',
-          onClick: (event) => {
-            event.stopPropagation()
-            dismiss()
+          ...clickOnly ? {} : {
+            onClick: (event) => {
+              event.stopPropagation()
+              dismiss()
+            },
           },
           style: {
             position: 'absolute',
-            right: '22px',
-            bottom: '20px',
-            padding: '7px 14px',
-            borderRadius: '999px',
-            border: '1px solid var(--dsw-alias-border-l2, rgba(255,255,255,0.22))',
-            background: 'var(--dsw-alias-bg-layer-2, rgba(0,0,0,0.42))',
-            color: 'var(--dsw-alias-label-primary, #ffffff)',
+            left: 0,
+            right: 0,
+            bottom: 0,
+            padding: '34px 20px 16px',
+            margin: 0,
+            border: 0,
+            textAlign: 'center',
             font: 'inherit',
-            fontSize: '13px',
-            cursor: 'pointer',
-            opacity: 0.72,
+            fontSize: '12.5px',
+            letterSpacing: '0.06em',
+            color: 'var(--dsw-alias-label-primary, #ffffff)',
+            // Faint enough to read past, present enough to be found.
+            opacity: 0.42,
+            // A soft scrim instead of a filled bar: keeps the line legible over a
+            // bright frame without drawing an edge across the picture.
+            background: 'linear-gradient(to top, rgba(0,0,0,0.36), rgba(0,0,0,0))',
+            cursor: clickOnly ? 'default' : 'pointer',
+            // In click mode the whole overlay is the target, so the hint must not
+            // swallow the very click that is meant to skip.
+            pointerEvents: clickOnly ? 'none' : 'auto',
+            userSelect: 'none',
           },
-        }, t.skip))
+        }, clickOnly ? t.skipClick : t.skip))
       }
 
       return topLayer(React.createElement('div', {
@@ -816,6 +990,24 @@ window.__ModuleLoader__.load({
       const [draft, setDraft] = React.useState('')
       const [state, setState] = React.useState({ status: 'loading' })
       const [busy, setBusy] = React.useState(false)
+      /** The switches, mirrored from the Host so the boxes reflect stored state. */
+      const [tail, setTail] = React.useState(false)
+      const [maximized, setMaximized] = React.useState(false)
+      const [random, setRandom] = React.useState(false)
+      /** What the Host found in the folder: the only things that can be ticked. */
+      const [library, setLibrary] = React.useState([])
+      /** Ticked file NAMES. Empty means "everything in the folder". */
+      const [selected, setSelected] = React.useState([])
+      const switches = { tailDissolve: tail, startMaximized: maximized, random }
+      /** @returns the ticked names as the Host stores them. */
+      const selectedNames = () => selected
+
+      /** Re-read the folder listing and the effective folder from the Host. */
+      const refreshLibrary = async () => {
+        const result = await payload()
+        setLibrary(Array.isArray(result?.library) ? result.library : [])
+        setDraft(typeof result?.effectiveFolder === 'string' ? result.effectiveFolder : '')
+      }
 
       React.useEffect(() => {
         let cancelled = false
@@ -828,7 +1020,17 @@ window.__ModuleLoader__.load({
           const shown = typeof result?.effectiveSrc === 'string' && result.effectiveSrc !== ''
             ? result.effectiveSrc
             : (typeof result?.settings?.src === 'string' ? result.settings.src : '')
-          setDraft(shown)
+          // The folder wins when there is one: the single path only exists as the
+          // fallback for an install that predates the folder.
+          setDraft(typeof result?.effectiveFolder === 'string' && result.effectiveFolder !== '' ? result.effectiveFolder : shown)
+          // The switches come from the same merge the player uses (stored value
+          // over the profile's patch row), so the boxes show what will actually
+          // happen rather than what was last clicked.
+          setTail(result?.settings?.tailDissolve === true)
+          setMaximized(result?.settings?.startMaximized === true)
+          setRandom(result?.settings?.random === true)
+          setLibrary(Array.isArray(result?.library) ? result.library : [])
+          setSelected(Array.isArray(result?.settings?.selected) ? result.settings.selected : [])
           setState({
             status: 'ready',
             media: (result && result.media) || { kind: 'none' },
@@ -875,15 +1077,31 @@ window.__ModuleLoader__.load({
         }
       }
 
-      const save = async (value) => {
+      /**
+       * Save the path and both switches together.
+       *
+       * Everything goes in one request because the Host writes one state file:
+       * sending only the path would silently reset the switches, and sending only
+       * one switch would write the other back from a stale value.
+       * @param value - the path to store (`''` clears it).
+       * @param next - the switch values; defaults to what the boxes show.
+       */
+      const save = async (value, next = switches) => {
         setBusy(true)
-        const result = await post(SAVE_URL, { src: value })
+        // The pool travels with every save for the same reason the switches do:
+        // a save that omitted it would look like an empty pool and wipe it.
+        // The single path is sent empty on purpose: a folder supersedes it, and
+        // leaving the old value behind would let it resurface as the fallback.
+        const result = await post(SAVE_URL, { src: '', folder: value, selected: selectedNames(), ...next })
         setBusy(false)
         if (result.ok !== true) {
           setState((previous) => ({ ...previous, status: 'ready', problem: 'load-failed' }))
           return
         }
         setDraft(value)
+        setTail(next.tailDissolve === true)
+        setMaximized(next.startMaximized === true)
+        setRandom(next.random === true)
         setState({
           status: 'ready',
           media: result.media || { kind: 'none' },
@@ -908,7 +1126,7 @@ window.__ModuleLoader__.load({
         key: 'field',
         style: { display: 'flex', flexDirection: 'column', gap: '6px', fontSize: '13px', fontWeight: 500, color: 'var(--dsw-alias-label-primary, #17181a)' },
       }, [
-        React.createElement('span', { key: 'label' }, t.pathLabel),
+        React.createElement('span', { key: 'label' }, t.folderLabel),
         React.createElement('div', { key: 'row', style: { display: 'flex', gap: '8px', alignItems: 'center' } }, [
           React.createElement('input', {
             key: 'input',
@@ -926,6 +1144,109 @@ window.__ModuleLoader__.load({
           button({ label: t.choose, onClick: choose, disabled: busy }),
         ]),
       ]))
+
+      // Each switch saves on click rather than waiting for "Save": a boolean has no
+      // draft state worth reviewing, and the path field keeps its own explicit save.
+      // Every save carries BOTH switches, so toggling one never writes the other
+      // back from a stale value.
+      const switchRow = (key, label, hint, checked, onToggle) => React.createElement('label', {
+        key,
+        style: {
+          display: 'flex',
+          alignItems: 'flex-start',
+          gap: '8px',
+          marginTop: '14px',
+          fontSize: '13px',
+          color: 'var(--dsw-alias-label-primary, #17181a)',
+          cursor: busy ? 'default' : 'pointer',
+        },
+      }, [
+        React.createElement('input', {
+          key: 'box',
+          type: 'checkbox',
+          checked,
+          disabled: busy,
+          'aria-label': label,
+          onChange: (event) => onToggle(event.target.checked),
+          style: { marginTop: '3px', flex: '0 0 auto' },
+        }),
+        React.createElement('span', { key: 'text' }, [
+          React.createElement('span', { key: 'label', style: { fontWeight: 500 } }, label),
+          React.createElement('span', {
+            key: 'hint',
+            style: { display: 'block', marginTop: '2px', lineHeight: 1.6, color: 'var(--dsw-alias-label-secondary, #5c6068)' },
+          }, hint),
+        ]),
+      ])
+
+      rows.push(React.createElement('div', {
+        key: 'library',
+        style: { display: 'flex', flexDirection: 'column', gap: '6px', marginTop: '16px' },
+      }, [
+        React.createElement('div', { key: 'head', style: { display: 'flex', alignItems: 'center', gap: '8px' } }, [
+          React.createElement('span', { key: 'label', style: { fontSize: '13px', fontWeight: 600 } }, t.libraryLabel),
+          React.createElement('span', { key: 'count', style: { fontSize: '12px', opacity: 0.7 } }, t.libraryCount(selected.length, library.length)),
+          React.createElement('span', { key: 'spacer', style: { flex: '1 1 auto' } }),
+          button({ key: 'reload', label: t.reloadLibrary, onClick: () => void refreshLibrary() }),
+        ]),
+        library.length === 0
+          ? React.createElement('div', { key: 'empty', style: { fontSize: '12px', opacity: 0.75, lineHeight: 1.6 } }, t.libraryEmpty)
+          : React.createElement('div', {
+              key: 'list',
+              style: {
+                display: 'flex',
+                flexDirection: 'column',
+                maxHeight: '280px',
+                overflowY: 'auto',
+                border: '1px solid rgba(128,128,128,.28)',
+                borderRadius: '8px',
+                padding: '4px',
+              },
+            }, library.map((entry) => {
+              const ticked = selected.includes(entry.name)
+              return React.createElement('label', {
+                key: entry.name,
+                style: {
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '8px',
+                  padding: '6px 8px',
+                  borderRadius: '6px',
+                  cursor: 'pointer',
+                  fontSize: '12.5px',
+                },
+              }, [
+                React.createElement('input', {
+                  key: 'tick',
+                  type: 'checkbox',
+                  checked: ticked,
+                  onChange: () => setSelected(ticked
+                    ? selected.filter((name) => name !== entry.name)
+                    : [...selected, entry.name]),
+                }),
+                React.createElement('span', { key: 'name', style: { flex: '1 1 auto', wordBreak: 'break-all' } }, entry.name),
+                React.createElement('span', { key: 'meta', style: { opacity: 0.65, fontSize: '11.5px', whiteSpace: 'nowrap' } },
+                  `${entry.kind === 'image' ? t.kindImage : t.kindVideo} · ${humanBytes(entry.bytes)}`),
+              ])
+            })),
+        React.createElement('div', { key: 'hint', style: { fontSize: '12px', opacity: 0.75, lineHeight: 1.6 } }, t.libraryHint),
+      ]))
+
+      rows.push(switchRow('random', t.randomLabel, t.randomHint, random, (next) => {
+        setRandom(next)
+        void save(draft, { ...switches, random: next })
+      }))
+
+      rows.push(switchRow('tail', t.tailLabel, t.tailHint, tail, (next) => {
+        setTail(next)
+        void save(draft, { ...switches, tailDissolve: next })
+      }))
+
+
+      rows.push(switchRow('maximized', t.maximizedLabel, t.maximizedHint, maximized, (next) => {
+        setMaximized(next)
+        void save(draft, { ...switches, startMaximized: next })
+      }))
 
       rows.push(React.createElement('div', {
         key: 'actions',
@@ -990,10 +1311,20 @@ window.__ModuleLoader__.load({
     return {
       inject: ['slots'],
       apply(ctx) {
-        // The settings page is always registered: it is how a video gets chosen
-        // in the first place.
-        ctx.slots.inject(TAB_SLOT, () => ctx.slots.register(
-          { name: TAB_SLOT, id: ROW_ID, order: 50, label: () => strings().tab },
+        // Announce the page, once, so the Host can apply its start-up window state.
+        //
+        // This fires on every page load and the Host is what decides whether that
+        // means "start-up": it maximizes at most once per process, so a plain
+        // reload never re-maximizes a window the user has just restored. Sending
+        // it unconditionally keeps the switch on the side that already reads the
+        // settings per request, rather than duplicating the decision here.
+        report(SPLASH_URL, { phase: 'startup' })
+
+        // Its own entry in the settings sidebar, not a tab buried inside the
+        // official plugin list: this is a page the user opens on purpose, and the
+        // other third-party plugins (skin loader, skins) each get a seat here too.
+        ctx.slots.inject(SECTION_SLOT, () => ctx.slots.register(
+          { name: SECTION_SLOT, kind: 'list', id: ROW_ID, order: 91, label: () => strings().tab },
           SplashSettings,
         ))
 
@@ -1001,7 +1332,9 @@ window.__ModuleLoader__.load({
           globalThis.__DSH_SPLASH__ = {
             probeFormats,
             fadeDelayFor,
-            version: 3,
+            tailDissolveDelayFor,
+            splashLifetimeMs,
+            version: 5,
           }
         } catch { /* a frozen globalThis is not worth failing a boot over */ }
 

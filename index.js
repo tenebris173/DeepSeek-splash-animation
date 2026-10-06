@@ -25,9 +25,9 @@
  */
 
 import { spawn } from 'node:child_process'
-import { createReadStream, existsSync, mkdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
+import { createReadStream, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
-import { dirname, extname, isAbsolute, join, resolve, sep } from 'node:path'
+import { basename, dirname, extname, isAbsolute, join, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 /** Absolute path of this package's directory; the picker script resolves from here. */
@@ -39,6 +39,22 @@ const CONFIG_ROUTE = `${ROUTE_BASE}/config.json`
 const MEDIA_ROUTE = `${ROUTE_BASE}/asset`
 const SAVE_ROUTE = `${ROUTE_BASE}/config`
 const PICK_ROUTE = `${ROUTE_BASE}/pick`
+/**
+ * The browser half reports the splash's own lifetime here.
+ *
+ * The Host cannot see when the overlay leaves — that happens in the page — so
+ * the fullscreen feature is driven by the half that actually knows: asked for
+ * when the overlay mounts, released when it goes. Registering the request from
+ * the browser also means a client half that never runs can never leave the
+ * window fullscreen.
+ */
+const SPLASH_ROUTE = `${ROUTE_BASE}/splash`
+
+/** Boolean settings the settings page owns and the state file stores verbatim. */
+const SWITCH_KEYS = ['tailDissolve', 'startMaximized', 'random']
+
+/** Phases the browser half reports. Only `startup` is acted on, once per process. */
+const SPLASH_PHASES = ['startup']
 
 /** Directory inside the DSH home that holds this plugin's own state. */
 const STATE_DIRNAME = 'dsh-splash-animation'
@@ -81,6 +97,90 @@ export function resolveEffectiveMedia(src, dshHome) {
   // report it as "not engaging" so DSH still boots cleanly.
   if (bundled.configured !== true) return { configured: false, source: 'unset' }
   return { ...bundled, source: 'bundled' }
+}
+
+/**
+ * Every file this plugin may play, in list order.
+ *
+ * ONE source of truth for the two places that must agree: the configuration
+ * route picks one of these and tells the page its URL, and the media route
+ * decides what it is allowed to serve. They were computed separately once, the
+ * folder arrived, and the splash spent a whole start 404-ing on its own video.
+ *
+ * Ticking is the ONLY thing that makes a file eligible. An empty tick list is a
+ * decision — play nothing — not a missing one, so a configured folder never
+ * quietly turns into "everything in it", and never falls back to the bundled
+ * video behind the user's back.
+ *
+ * @param settings - the effective configuration.
+ * @param dshHome - absolute DSH home directory.
+ * @returns one `{ root, name, bytes }` per candidate, or an empty list.
+ */
+function eligibleEntries(settings, dshHome) {
+  const folder = typeof settings?.folder === 'string' ? settings.folder.trim() : ''
+  if (folder !== '') {
+    const root = toAbsolutePath(folder, dshHome)
+    const ticked = Array.isArray(settings?.selected) ? settings.selected : []
+    return listLibrary(folder, dshHome)
+      .filter((entry) => ticked.includes(entry.name))
+      .map((entry) => ({ root, name: entry.name, bytes: entry.bytes }))
+  }
+  // No folder at all: the single path from before the folder existed, if any.
+  const single = resolveEffectiveMedia(settings?.src, dshHome)
+  if (single.configured === true && single.problem === undefined) {
+    return [{ root: dirname(single.path), name: single.name, bytes: single.bytes }]
+  }
+  return []
+}
+
+/**
+ * Choose which reference to resolve: a ticked file in the folder, else `src`.
+ *
+ * A configured folder that yields no candidate returns the empty string, which
+ * resolves to "not configured" and leaves DSH to start normally — the user
+ * ticked nothing, and substituting the bundled video would override a decision
+ * they just made. Only a profile with no folder at all falls back to `src`.
+ *
+ * @param settings - the effective configuration.
+ * @param dshHome - absolute DSH home directory.
+ * @param pick - random source in [0, 1); injectable for the test suite.
+ * @returns the reference to resolve.
+ */
+export function pickEffectiveSource(settings, dshHome, pick = Math.random) {
+  const folder = typeof settings?.folder === 'string' ? settings.folder.trim() : ''
+  const entries = eligibleEntries(settings, dshHome)
+  if (entries.length === 0) return folder === '' ? settings?.src : ''
+  if (settings?.random !== true) return join(entries[0].root, entries[0].name)
+  // `pick` is a test seam; a caller-supplied one must not be able to take the
+  // page load down with it, so a throw falls back to the first entry.
+  let raw = 0
+  try {
+    raw = typeof pick === 'function' ? Number(pick()) : 0
+  } catch {
+    raw = 0
+  }
+  const bounded = Number.isFinite(raw) ? Math.min(Math.max(raw, 0), 0.999999) : 0
+  const chosen = entries[Math.floor(bounded * entries.length)]
+  return join(chosen.root, chosen.name)
+}
+
+/**
+ * Resolve one requested file name against the eligible set.
+ *
+ * This is what lets the media route serve whatever the configuration route
+ * announced, without either of them guessing at the other's rule.
+ *
+ * @param settings - the effective configuration.
+ * @param dshHome - absolute DSH home directory.
+ * @param requested - the decoded name from the request path.
+ * @returns the media descriptor, or `undefined` when it must not be served.
+ */
+export function resolveRequestedMedia(settings, dshHome, requested) {
+  const hit = eligibleEntries(settings, dshHome).find((entry) => entry.name === requested)
+  if (hit === undefined) return undefined
+  const media = resolveEffectiveMedia(join(hit.root, hit.name), dshHome)
+  if (media.configured !== true || media.problem !== undefined) return undefined
+  return media
 }
 
 /**
@@ -165,6 +265,61 @@ export const DEFAULTS = {
   waitForAppMs: 2500,
   holdAfterEndMs: 0,
   maxReplays: 0,
+  /**
+   * Whether the dissolve starts before the clip ends (tail cross-dissolve).
+   *
+   * Off — the default, and the behaviour every earlier version had — plays the
+   * clip in full on top of the interface and only then dissolves, so the last
+   * frame is held for `fadeOutMs` after the clip is over. On, the dissolve
+   * begins `fadeOutMs` before the clip ends, so the clip is still visibly
+   * playing while the interface comes through underneath and the hand-off
+   * completes exactly on the clip's last frame. `holdAfterEndMs` has no effect
+   * in this mode. Ignored while `maxReplays > 0`, because dissolving before the
+   * first pass would cut the repeats short; it applies to single-pass clips.
+   */
+  tailDissolve: false,
+  /**
+   * Whether the DSH window is maximized when the application starts.
+   *
+   * Applied at most ONCE per host process, from the browser half's start-up
+   * report — which is what makes "start-up" mean the application rather than the
+   * page. A plain reload reports again and is deliberately ignored, so a window
+   * the user has just restored is not snapped back to maximized under them.
+   *
+   * How it is done, and why it looks like this: the Host is a plain Node child
+   * process (`ELECTRON_RUN_AS_NODE=1`), so it has no `BrowserWindow` — the
+   * windows belong to the Electron main process — and the desktop shell exposes
+   * no IPC that changes window geometry. The only route left is a Win32 call
+   * from the Host's own PowerShell, which is the same mechanism the file picker
+   * already uses. Consequences: Windows only, and it drives the window from
+   * outside the application. Off by default.
+   */
+  startMaximized: false,
+  /**
+   * Whether one of the ticked files is played at random instead of the first.
+   *
+   * Rolled on the Host when the page asks for its configuration, so every
+   * application start rolls again. The browser half receives one already
+   * resolved file and knows nothing about the folder or the selection.
+   */
+  random: false,
+  /**
+   * The folder the settings page lists and the user ticks files in.
+   *
+   * Absent means the plugin falls back to `src` (a path from an earlier
+   * version) and then to the bundled video. A folder whose listing is empty
+   * behaves the same way, so a wrong folder cannot black out the splash.
+   */
+  folder: undefined,
+  /**
+   * File NAMES, not paths, ticked inside `folder`.
+   *
+   * Names rather than paths so moving or renaming the folder does not silently
+   * invalidate every entry. An empty selection means "everything in the folder",
+   * which is what keeps choosing a folder without ticking anything from playing
+   * nothing at all.
+   */
+  selected: [],
 }
 
 /** `skip` values the player implements. */
@@ -206,6 +361,15 @@ export function normalizeConfig(raw) {
   const background = typeof input.background === 'string' && /^#(?:[0-9a-f]{3}|[0-9a-f]{6})$/i.test(input.background)
     ? input.background
     : DEFAULTS.background
+  // An install from before the folder existed stores one path. Deriving the
+  // folder and the tick from it means the upgrade shows the user's own video,
+  // already ticked, instead of an empty page that looks like data loss.
+  const legacy = typeof input.src === 'string' ? input.src.trim() : ''
+  const declaredFolder = typeof input.folder === 'string' ? input.folder.trim() : ''
+  const migrated = declaredFolder === '' && legacy !== ''
+  const folder = migrated
+    ? folderFromLegacy(legacy)
+    : (declaredFolder === '' ? undefined : declaredFolder)
   return {
     // `undefined` is preserved, and it means "never chosen" — which is what lets a
     // bundled default apply. An empty string means "clear", i.e. never play.
@@ -223,7 +387,102 @@ export function normalizeConfig(raw) {
     waitForAppMs: clampNumber(input.waitForAppMs, DEFAULTS.waitForAppMs, 0, 60000),
     holdAfterEndMs: clampNumber(input.holdAfterEndMs, DEFAULTS.holdAfterEndMs, 0, 60000),
     maxReplays: Math.round(clampNumber(input.maxReplays, DEFAULTS.maxReplays, 0, 100)),
+    tailDissolve: typeof input.tailDissolve === 'boolean' ? input.tailDissolve : DEFAULTS.tailDissolve,
+    startMaximized: typeof input.startMaximized === 'boolean' ? input.startMaximized : DEFAULTS.startMaximized,
+    random: typeof input.random === 'boolean' ? input.random : DEFAULTS.random,
+    folder,
+    selected: migrated
+      ? normalizeSelected([legacy.slice(Math.max(legacy.lastIndexOf('/'), legacy.lastIndexOf('\\')) + 1)])
+      : normalizeSelected(input.selected),
   }
+}
+
+/** How many files one folder may offer. Bounds the settings payload. */
+const MAX_LIBRARY = 500
+
+/**
+ * Derive the folder a legacy single path sits in.
+ *
+ * Two details that matter more than they look:
+ *   - the trailing separator is dropped, so the settings field shows
+ *     `…\media` rather than `…\media\`;
+ *   - a drive root keeps its separator — stripping it would leave `C:`, which is
+ *     not an absolute path and would resolve against the DSH home instead.
+ * @param legacy - the stored `src`.
+ * @returns the folder, or `undefined` when there is nothing usable.
+ */
+function folderFromLegacy(legacy) {
+  const cut = legacy.slice(0, Math.max(legacy.lastIndexOf('/'), legacy.lastIndexOf('\\')) + 1)
+  if (cut === '') return undefined
+  const bare = cut.replace(/[\\/]+$/, '')
+  if (bare === '' || bare.endsWith(':')) return cut
+  return bare
+}
+
+/**
+ * Accept a ticked-file selection: bare file names, de-duplicated and capped.
+ *
+ * A name that contains a path separator is dropped: the value is resolved
+ * against the configured folder, and letting a separator through would make a
+ * selection escape the folder the user chose.
+ * @param value - the candidate selection.
+ * @returns the accepted names.
+ */
+function normalizeSelected(value) {
+  if (!Array.isArray(value)) return []
+  const seen = new Set()
+  const selected = []
+  for (const entry of value) {
+    if (typeof entry !== 'string') continue
+    const name = entry.trim().slice(0, MAX_SRC_LENGTH)
+    if (name === '' || name.includes('/') || name.includes('\\') || seen.has(name)) continue
+    seen.add(name)
+    selected.push(name)
+    if (selected.length >= MAX_LIBRARY) break
+  }
+  return selected
+}
+
+/**
+ * List the playable files in a folder.
+ *
+ * Only formats the player can actually use are returned, so the settings page
+ * never offers a file that would fail on the next start. Sorted by name for a
+ * stable list between page loads.
+ * @param folder - the configured folder, as stored.
+ * @param dshHome - absolute DSH home directory.
+ * @returns the entries, or an empty list when the folder is unusable.
+ */
+export function listLibrary(folder, dshHome) {
+  if (typeof folder !== 'string' || folder.trim() === '') return []
+  const root = toAbsolutePath(folder.trim(), dshHome)
+  let names
+  try {
+    if (!statSync(root).isDirectory()) return []
+    names = readdirSync(root)
+  } catch {
+    return []
+  }
+  const entries = []
+  for (const name of names.sort((a, b) => a.localeCompare(b, 'zh-Hans-CN'))) {
+    const extension = extensionOf(name)
+    const mime = FORMATS[extension]
+    if (mime === undefined) continue
+    try {
+      const stats = statSync(join(root, name))
+      if (!stats.isFile() || stats.size > MAX_MEDIA_BYTES) continue
+      entries.push({
+        name,
+        extension,
+        kind: IMAGE_KIND.has(extension) ? 'image' : 'video',
+        bytes: stats.size,
+      })
+    } catch {
+      // An unreadable entry is simply not offered.
+    }
+    if (entries.length >= MAX_LIBRARY) break
+  }
+  return entries
 }
 
 /** @returns the lower-case extension of `file`, without the dot. */
@@ -358,19 +617,184 @@ function readState(dshHome) {
 }
 
 /**
- * Replace the stored `src` atomically, so a crash mid-write cannot leave a
- * half-written state file that breaks the next boot.
+ * Replace the stored `src` — and optionally the boolean switches — atomically,
+ * so a crash mid-write cannot leave a half-written state file that breaks the
+ * next boot.
+ *
+ * A switch is only written when it arrived as a boolean: the settings page sends
+ * every switch on every save, but an older client sending only `src` must not
+ * clear a value the profile's patch row set.
  * @param dshHome - absolute DSH home directory.
  * @param src - the new path, or `''` to clear it.
+ * @param switches - boolean values to store; anything else is left alone.
  */
-function writeState(dshHome, src) {
+function writeState(dshHome, src, switches, extras) {
   const dir = join(dshHome, STATE_DIRNAME)
   mkdirSync(dir, { recursive: true })
   const file = stateFile(dshHome)
   const temporary = `${file}.tmp`
   const next = { ...readState(dshHome), src }
+  for (const key of SWITCH_KEYS) {
+    if (typeof switches?.[key] === 'boolean') next[key] = switches[key]
+  }
+  // Folder and selection are written only when the caller sent them, for the
+  // same reason the switches are: a client that predates the feature must not
+  // wipe the configuration it does not know about.
+  if (typeof extras?.folder === 'string') next.folder = extras.folder.trim().slice(0, MAX_SRC_LENGTH)
+  if (Array.isArray(extras?.selected)) next.selected = normalizeSelected(extras.selected)
+  // A folder supersedes the single path: leaving the old one behind would let it
+  // reappear as the fallback if the folder is later emptied.
+  if (typeof extras?.folder === 'string' && extras.folder.trim() !== '') next.src = ''
   writeFileSync(temporary, `${JSON.stringify(next, null, 2)}\n`, 'utf8')
   renameSync(temporary, file)
+}
+
+/** Slack added to the splash's own estimate before the safety release fires. */
+const FULLSCREEN_SAFETY_SLACK_MS = 15000
+
+/**
+ * Electron's `BrowserWindow`, or `undefined` on a host without Electron.
+ *
+ * Loaded the same way the file picker loads Electron, and for the same reason:
+ * this package must resolve with zero dependencies, so the module is requested
+ * at call time and a failure simply means "this host has no desktop window".
+ * @returns the constructor, or `undefined`.
+ */
+async function electronBrowserWindow() {
+  try {
+    const { createRequire } = await import('node:module')
+    const require = createRequire(import.meta.url)
+    const electron = require('electron')
+    const api = electron.BrowserWindow ?? electron.default?.BrowserWindow
+    return typeof api === 'function' ? api : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * Every live Electron window the splash may legitimately resize.
+ *
+ * The welcome and login windows declare `fullscreenable: false`, so they are
+ * filtered out by asking the window itself rather than by guessing at titles.
+ * @returns the candidate windows, or an empty list.
+ */
+async function electronWindows() {
+  const BrowserWindow = await electronBrowserWindow()
+  if (BrowserWindow === undefined) return []
+  try {
+    return BrowserWindow.getAllWindows().filter((win) => {
+      try {
+        if (win.isDestroyed?.() === true) return false
+        if (typeof win.isFullScreenable === 'function' && win.isFullScreenable() === false) return false
+        return true
+      } catch {
+        return false
+      }
+    })
+  } catch {
+    return []
+  }
+}
+
+/** @returns Electron's focused window, or `undefined`. */
+async function electronFocusedWindow() {
+  const BrowserWindow = await electronBrowserWindow()
+  if (BrowserWindow === undefined || typeof BrowserWindow.getFocusedWindow !== 'function') return undefined
+  try {
+    return BrowserWindow.getFocusedWindow() ?? undefined
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * Choose the window the DSH page is in.
+ *
+ * Preferring the focused window is right when the user is looking at DSH, and
+ * matching the loopback URL is the tie-breaker that still finds it when the
+ * splash runs during a reload in a background window. `getURL` is only a hint:
+ * a window with no reachable `webContents` falls through rather than throwing.
+ * @param list - candidate windows.
+ * @param focused - the focused window, when there is one.
+ * @returns the chosen window, or `undefined` for an empty list.
+ */
+function pickSplashWindow(list, focused) {
+  if (focused !== undefined && list.includes(focused)) return focused
+  const served = list.find((win) => {
+    try {
+      const url = String(win.webContents?.getURL?.() ?? '')
+      return /^https?:\/\/(?:127\.0\.0\.1|localhost|\[::1\]):\d+/i.test(url)
+    } catch {
+      return false
+    }
+  })
+  return served ?? list[0]
+}
+
+/**
+ * Run the bundled PowerShell maximiser.
+ *
+ * @param processName - executable name owning the window, without the extension.
+ * @returns one of none / already / maximized / refused, or undefined when the
+ *   helper or PowerShell itself is unavailable.
+ */
+function maximizeViaPowerShell(processName) {
+  const script = join(PACKAGE_DIR, 'tools', 'maximize-window.ps1')
+  if (!existsSync(script)) return Promise.resolve(undefined)
+  if (process.platform !== 'win32') return Promise.resolve(undefined)
+  return (__testHooks.runCapture ?? runCapture)('powershell.exe', [
+    '-NoProfile',
+    '-ExecutionPolicy', 'Bypass',
+    '-File', script,
+    '-ProcessName', processName,
+  ], { logger: { warn: () => {} } }).then((output) => {
+    // The script prints exactly one word; anything else means it did not run.
+    const word = typeof output === 'string' ? output.trim().split(/\r?\n/).pop() : undefined
+    return ['none', 'already', 'maximized', 'refused'].includes(word) ? word : undefined
+  })
+}
+
+/**
+ * Maximise the DSH window once, at application start.
+ *
+ * The Host cannot do this through Electron: it is a plain Node child process
+ * (ELECTRON_RUN_AS_NODE=1), so the windows — owned by the Electron main
+ * process — are not reachable, and the desktop shell exposes no IPC that changes
+ * window geometry. What is left is a Win32 call from the Host's own PowerShell,
+ * the same mechanism the file picker already relies on. Consequences: Windows
+ * only, and the window is driven from outside the application.
+ *
+ * @param deps - override seams for the test suite.
+ * @returns the once/done controller.
+ */
+export function createStartMaximized({
+  run = maximizeViaPowerShell,
+  processName = basename(process.execPath, '.exe'),
+} = {}) {
+  let done = false
+
+  /**
+   * Apply the start-up window state at most once.
+   * @returns whether this call maximized the window.
+   */
+  const once = async () => {
+    if (done) return false
+    let result
+    try {
+      result = await run(processName)
+    } catch {
+      result = undefined
+    }
+    // No window found is the one outcome that does NOT count as handled: the
+    // window may simply not exist yet, and the next page load is a fine second
+    // chance. Every other outcome is a decision about a real window.
+    if (result === 'none' || result === undefined) return false
+    done = true
+    return result === 'maximized'
+  }
+
+  return { once, done: () => done }
 }
 
 /**
@@ -506,10 +930,10 @@ function readJsonBody(req, limit) {
  * @param initial - an existing path to start the dialog at.
  * @returns the chosen absolute path, or `undefined` on cancel or unsupported host.
  */
-async function pickMediaFile(ctx, initial) {
-  const electronResult = await pickViaElectron(initial)
+async function pickMediaFile(ctx, initial, mode = 'file') {
+  const electronResult = await pickViaElectron(initial, mode)
   if (electronResult !== undefined) return electronResult
-  if (process.platform === 'win32') return pickViaPowerShell(ctx, initial)
+  if (process.platform === 'win32') return pickViaPowerShell(ctx, initial, mode)
   if (process.platform === 'darwin') return pickViaOsa(initial)
   return pickViaZenity(initial)
 }
@@ -549,19 +973,36 @@ async function pickViaElectron(initial) {
 }
 
 /**
+ * Where this plugin's media is meant to live.
+ *
+ * The folder picker starts here when nothing is configured yet, so the dialog
+ * opens on the folder the settings page and the README both name rather than
+ * wherever the last dialog happened to be.
+ *
+ * @param dshHome - absolute DSH home directory.
+ * @returns the absolute recommended media directory.
+ */
+export function defaultMediaDir(dshHome) {
+  return join(dshHome, STATE_DIRNAME, 'media')
+}
+
+/**
  * Run the bundled PowerShell picker.
  * @param ctx - the plugin context.
  * @param initial - starting path.
  * @returns the chosen path, `''` on cancel, or `undefined` when unavailable.
  */
-function pickViaPowerShell(ctx, initial) {
+function pickViaPowerShell(ctx, initial, mode = 'file') {
   const script = join(PACKAGE_DIR, 'tools', 'pick-media-file.ps1')
   if (!existsSync(script)) {
     ctx.logger.warn('dsh-splash-animation: tools/pick-media-file.ps1 is missing from the installed package; the settings page keeps its text field.')
     return Promise.resolve(undefined)
   }
-  const startDir = initial === '' ? '' : dirname(initial)
-  const startFile = initial === '' ? '' : initial.slice(initial.lastIndexOf(sep) + 1)
+  // A folder dialog starts AT the folder it was given; a file dialog starts in
+  // the folder the file lives in, with the name prefilled. Taking `dirname` for
+  // both is what made the folder picker open one level too high.
+  const startDir = initial === '' ? '' : (mode === 'folder' ? initial : dirname(initial))
+  const startFile = initial === '' || mode === 'folder' ? '' : initial.slice(initial.lastIndexOf(sep) + 1)
   const carrier = join(tmpdir(), `dsh-splash-pick-${process.pid}-${Date.now()}.txt`)
   return (__testHooks.runCapture ?? runCapture)('powershell.exe', [
     '-NoProfile',
@@ -574,6 +1015,7 @@ function pickViaPowerShell(ctx, initial) {
     '-OutFile', carrier,
     '-InitialDirectory', startDir,
     '-InitialFile', startFile,
+    '-Mode', mode,
   ], ctx).then((output) => {
     if (output === undefined) return undefined
     // The chosen path travels through a UTF-8 FILE, not stdout: a console encodes
@@ -693,7 +1135,13 @@ function runCapture(command, args, ctx) {
 export function apply(ctx, rawConfig, options = {}) {
   const dshHome = process.env.DSH_HOME ?? join(homedir(), '.dsh')
   const patchConfig = normalizeConfig(rawConfig)
-  const pick = options.picker ?? ((initial) => pickMediaFile(ctx, initial))
+  const pick = options.picker ?? ((initial, mode) => pickMediaFile(ctx, initial, mode))
+  // The fullscreen controller is built per mount so a disposed plugin can still
+  // reach the one window it resized.
+  const startMaximized = options.maximize ?? createStartMaximized({
+    run: options.run,
+    processName: options.processName,
+  })
 
   /**
    * Effective settings: patch row, then the settings-page file on top.
@@ -732,7 +1180,7 @@ export function apply(ctx, rawConfig, options = {}) {
     try {
       if (!Array.isArray(table)) return
       const effective = settings()
-      const media = resolveEffectiveMedia(effective.src, dshHome)
+      const media = resolveEffectiveMedia(pickEffectiveSource(effective, dshHome), dshHome)
       // Nothing to play (or nothing playable) means the shell's own boot screen is
       // the only thing the user would see: leave it alone.
       if (media.configured !== true || media.problem !== undefined) return
@@ -830,7 +1278,7 @@ export function apply(ctx, rawConfig, options = {}) {
       handler: (req, res) => {
         if (guard(req, res)) return
         const effective = settings()
-        const media = resolveEffectiveMedia(effective.src, dshHome)
+        const media = resolveEffectiveMedia(pickEffectiveSource(effective, dshHome), dshHome)
         res.writeHead(200, {
           'Content-Type': 'application/json; charset=utf-8',
           'Cache-Control': 'no-store',
@@ -868,6 +1316,16 @@ export function apply(ctx, rawConfig, options = {}) {
             : '',
           /** True once the user has chosen (or explicitly cleared) something. */
           chosen: media.source === 'chosen' || media.source === 'cleared',
+          /**
+           * What the settings page lists: the playable files in the folder.
+           *
+           * Sent with the configuration rather than from a route of its own —
+           * the page already fetches this one, and a second round trip would only
+           * add a way for the two to disagree.
+           */
+          library: listLibrary(effective.folder, dshHome),
+          /** The folder as the page should show it, after the legacy migration. */
+          effectiveFolder: effective.folder ?? '',
         }))
       },
     }))
@@ -890,8 +1348,15 @@ export function apply(ctx, rawConfig, options = {}) {
           return
         }
         const src = body.src.trim().slice(0, MAX_SRC_LENGTH)
+        // Optional: an older client sends only `src`, which must leave the stored
+        // switches untouched rather than resetting them. Anything that is not a
+        // boolean is dropped here, so a malformed body cannot store junk.
+        const switches = {}
+        for (const key of SWITCH_KEYS) {
+          if (typeof body[key] === 'boolean') switches[key] = body[key]
+        }
         try {
-          writeState(dshHome, src)
+          writeState(dshHome, src, switches, { folder: body.folder, selected: body.selected })
         } catch (error) {
           ctx.logger.warn(`dsh-splash-animation: could not write the state file (${error.code ?? error.message})`)
           res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' })
@@ -901,7 +1366,7 @@ export function apply(ctx, rawConfig, options = {}) {
         // Saving — including saving an empty path — records an explicit choice, so
         // the bundled default no longer applies afterwards. That is what makes
         // "clear it and it stops playing" true.
-        const media = resolveEffectiveMedia(src, dshHome)
+        const media = resolveEffectiveMedia(pickEffectiveSource(settings(), dshHome), dshHome)
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' })
         res.end(JSON.stringify({
           ok: true,
@@ -927,6 +1392,56 @@ export function apply(ctx, rawConfig, options = {}) {
       },
     }))
 
+    // The splash's own lifetime, reported by the only half that can see it.
+    //
+    // Fullscreen is requested here rather than at injection time on purpose: the
+    // request then cannot arrive from a client that is not actually showing a
+    // splash, so a broken browser half leaves the window exactly as it found it.
+    scoped.effect(() => {
+      const registration = scoped.webServer.register({
+        kind: 'exact',
+        path: SPLASH_ROUTE,
+        handler: async (req, res) => {
+          if (guard(req, res)) return
+          if (req.method !== 'POST') {
+            res.writeHead(405, { Allow: 'POST' })
+            res.end()
+            return
+          }
+          const body = await readJsonBody(req, 4 * 1024)
+          if (body === undefined || !SPLASH_PHASES.includes(body.phase)) {
+            res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' })
+            res.end(JSON.stringify({ ok: false, error: 'invalid-body' }))
+            return
+          }
+          // The only phase the Host acts on. The browser half reports `startup`
+          // on every page load; `once()` is what makes that mean the application
+          // rather than the page, so a reload never re-maximises a window the
+          // user has just restored.
+          const maximized = body.phase === 'startup' && settings().startMaximized === true
+            ? await startMaximized.once()
+            : false
+          res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' })
+          res.end(JSON.stringify({ ok: true, maximized }))
+        },
+      })
+      return () => {
+        // `webServer.register` returns the disposer FUNCTION itself, not an object
+        // with `dispose` — and each disposer deletes its route BY PATH. Getting
+        // this wrong is not a leak of one route: on a profile recomposition the
+        // new fiber registers every path while the old fiber is still disposing,
+        // so a stale disposer deletes the route the new fiber just installed.
+        // That is exactly how the settings card lost `/config.json` and started
+        // reporting "读不到插件配置".
+        try {
+          if (typeof registration === 'function') registration()
+          else registration?.dispose?.()
+        } catch {
+          // The route is already gone; there is nothing left to undo.
+        }
+      }
+    })
+
     // Opens a native dialog in the Host process; the browser cannot read a local
     // file path, so the pick has to happen here.
     scoped.effect(() => scoped.webServer.register({
@@ -939,7 +1454,25 @@ export function apply(ctx, rawConfig, options = {}) {
           res.end()
           return
         }
-        const chosen = await pick(settings().src)
+        // Folder is the default: the settings page chooses a folder and lists what
+        // is inside it, so a client that sends no mode means "folder". `mode:
+        // 'file'` still reaches the single-file dialog.
+        //
+        // The body has to be READ before it can be consulted — an earlier version
+        // referenced an undeclared `body` here, which in strict mode throws on
+        // every call and surfaced as the generic "could not read the settings"
+        // error the moment anyone pressed the button.
+        const body = await readJsonBody(req, 4 * 1024)
+        const mode = body?.mode === 'file' ? 'file' : 'folder'
+        const effective = settings()
+        // A folder dialog must open ON the media folder. Sending `src` for both
+        // modes opened it wherever Windows last remembered, because configuring a
+        // folder clears `src` — and with nothing configured at all the sensible
+        // place to land is the folder this plugin tells users to keep media in.
+        const initial = mode === 'folder'
+          ? (effective.folder ?? defaultMediaDir(dshHome))
+          : (effective.src ?? '')
+        const chosen = await pick(initial, mode)
         // `undefined` means this host has no dialog at all; the settings page
         // then says so and points at the text field.
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' })
@@ -957,11 +1490,6 @@ export function apply(ctx, rawConfig, options = {}) {
           res.end()
           return
         }
-        const media = resolveEffectiveMedia(settings().src, dshHome)
-        if (media.configured !== true || media.problem !== undefined) {
-          notFound(res)
-          return
-        }
         let requested
         try {
           requested = decodeURIComponent(String(req.url ?? '').slice(MEDIA_ROUTE.length).replace(/^\//, '').split('?')[0])
@@ -969,8 +1497,12 @@ export function apply(ctx, rawConfig, options = {}) {
           notFound(res)
           return
         }
-        // Only the currently configured file is ever served.
-        if (requested !== media.name) {
+        // Resolved through the same eligible set the configuration route picked
+        // from, so whatever it announced as `media.url` is exactly what is served
+        // here. Checking `settings().src` instead was a 404 on every start once
+        // the folder took over.
+        const media = resolveRequestedMedia(settings(), dshHome, requested)
+        if (media === undefined) {
           notFound(res)
           return
         }

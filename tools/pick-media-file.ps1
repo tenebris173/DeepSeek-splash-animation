@@ -24,7 +24,10 @@
 param(
   [Parameter(Mandatory = $true)][string]$OutFile,
   [string]$InitialDirectory = '',
-  [string]$InitialFile = ''
+  [string]$InitialFile = '',
+  # 'file' or 'folder'. The settings page needs both: a folder to list, and
+  # nothing else — the file dialog is kept for the single-path fallback.
+  [string]$Mode = 'file'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -33,26 +36,37 @@ try {
   Add-Type -AssemblyName System.Windows.Forms
   Add-Type -AssemblyName System.Drawing
 
-  $dialog = New-Object System.Windows.Forms.OpenFileDialog
-  $dialog.Title = 'Select a video or animated image for the DSH splash'
-  $dialog.CheckFileExists = $true
-  $dialog.CheckPathExists = $true
-  $dialog.Multiselect = $false
-  $dialog.RestoreDirectory = $true
+  if ($Mode -eq 'folder') {
+    # Folder mode: the settings page picks WHERE its media lives and lists what is
+    # inside itself, so this dialog has no filter and no file name.
+    $dialog = New-Object System.Windows.Forms.FolderBrowserDialog
+    $dialog.Description = 'Choose the folder that holds your splash videos and images'
+    $dialog.ShowNewFolderButton = $true
+    if ($InitialDirectory -ne '' -and (Test-Path -LiteralPath $InitialDirectory)) {
+      $dialog.SelectedPath = $InitialDirectory
+    }
+  } else {
+    $dialog = New-Object System.Windows.Forms.OpenFileDialog
+    $dialog.Title = 'Select a video or animated image for the DSH splash'
+    $dialog.CheckFileExists = $true
+    $dialog.CheckPathExists = $true
+    $dialog.Multiselect = $false
+    $dialog.RestoreDirectory = $true
 
-  # Filter order matters: the first entry is what the dialog opens on. The
-  # "All supported" entry repeats the same set so a user who does not care about
-  # the distinction still sees every acceptable file.
-  $video = 'Video (*.webm;*.mp4;*.m4v;*.mov;*.mkv;*.ogv;*.ogm;*.mpg;*.mpeg;*.ts)|*.webm;*.mp4;*.m4v;*.mov;*.mkv;*.ogv;*.ogm;*.mpg;*.mpeg;*.ts'
-  $image = 'Animated / still image (*.gif;*.apng;*.webp;*.avif;*.png;*.jpg;*.jpeg;*.svg;*.bmp;*.ico)|*.gif;*.apng;*.webp;*.avif;*.png;*.jpg;*.jpeg;*.svg;*.bmp;*.ico'
-  $all = 'All supported media|*.webm;*.mp4;*.m4v;*.mov;*.mkv;*.ogv;*.ogm;*.mpg;*.mpeg;*.ts;*.gif;*.apng;*.webp;*.avif;*.png;*.jpg;*.jpeg;*.svg;*.bmp;*.ico'
-  $dialog.Filter = "$all|$video|$image|All files (*.*)|*.*"
+    # Filter order matters: the first entry is what the dialog opens on. The
+    # "All supported" entry repeats the same set so a user who does not care about
+    # the distinction still sees every acceptable file.
+    $video = 'Video (*.webm;*.mp4;*.m4v;*.mov;*.mkv;*.ogv;*.ogm;*.mpg;*.mpeg;*.ts)|*.webm;*.mp4;*.m4v;*.mov;*.mkv;*.ogv;*.ogm;*.mpg;*.mpeg;*.ts'
+    $image = 'Animated / still image (*.gif;*.apng;*.webp;*.avif;*.png;*.jpg;*.jpeg;*.svg;*.bmp;*.ico)|*.gif;*.apng;*.webp;*.avif;*.png;*.jpg;*.jpeg;*.svg;*.bmp;*.ico'
+    $all = 'All supported media|*.webm;*.mp4;*.m4v;*.mov;*.mkv;*.ogv;*.ogm;*.mpg;*.mpeg;*.ts;*.gif;*.apng;*.webp;*.avif;*.png;*.jpg;*.jpeg;*.svg;*.bmp;*.ico'
+    $dialog.Filter = "$all|$video|$image|All files (*.*)|*.*"
 
-  if ($InitialDirectory -ne '' -and (Test-Path -LiteralPath $InitialDirectory)) {
-    $dialog.InitialDirectory = $InitialDirectory
-  }
-  if ($InitialFile -ne '') {
-    $dialog.FileName = $InitialFile
+    if ($InitialDirectory -ne '' -and (Test-Path -LiteralPath $InitialDirectory)) {
+      $dialog.InitialDirectory = $InitialDirectory
+    }
+    if ($InitialFile -ne '') {
+      $dialog.FileName = $InitialFile
+    }
   }
 
   # A dialog owned by a hidden form is centred on the screen and reliably comes
@@ -66,11 +80,12 @@ try {
   $result = $dialog.ShowDialog($owner)
   $owner.Dispose()
 
-  if ($result -eq [System.Windows.Forms.DialogResult]::OK -and $dialog.FileName -ne '') {
+  $choice = if ($Mode -eq 'folder') { $dialog.SelectedPath } else { $dialog.FileName }
+  if ($result -eq [System.Windows.Forms.DialogResult]::OK -and $choice -ne '') {
     # No BOM: the caller reads this as plain UTF-8 and would otherwise get a
     # U+FEFF glued to the front of a Windows path.
     $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
-    [System.IO.File]::WriteAllText($OutFile, $dialog.FileName, $utf8NoBom)
+    [System.IO.File]::WriteAllText($OutFile, $choice, $utf8NoBom)
   }
   $dialog.Dispose()
   exit 0
