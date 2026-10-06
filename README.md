@@ -212,9 +212,23 @@ dsh plugin --profile <你的 profile> add github:tenebris173/DeepSeek-splash-ani
 
 ### 素材声明
 
-- 仓库内 `assets/` 下的 `default.mp4`、`fit-compare.png`、`screenshot-splash.png` 是**上游自带**的文件，随上游的 MIT 许可一起分发。
-- 任何**用户自己放进素材文件夹**的视频（游戏、影视、录制片段等）**都不属于本仓库**，也不应随本仓库分发——那类素材的著作权属于原权利人。
-- 三段演示片段（`开机动画*.mp4`）取自 `lxj5820/dsh-boot-animation`，**不包含在本仓库里**，仅在本地测试时使用。
+**代码是 MIT，素材不是。** 这条界线分开写，因为 MIT 只覆盖代码。
+
+`assets/` 下的 `default.mp4`、`fit-compare.png`、`screenshot-splash.png` 是**上游自带**的文件，随上游的 MIT 许可一起分发。
+
+`media/` 下是**开箱即用的示例素材**，逐个文件的来源与状态见 [media/README.md](media/README.md)：
+
+| 文件 | 来源 | 状态 |
+|---|---|---|
+| `开机动画1/2/3-*.mp4` | [`lxj5820/dsh-boot-animation`](https://github.com/lxj5820/dsh-boot-animation) | 随该仓库的 **MIT** 许可 |
+| `PRTS.mp4`、`PRTS启动-10秒.mp4` | 《明日方舟》及其权利人（鹰角网络） | **非本仓库所有**，见下 |
+| `普鲸声音重叠.mp4` | DeepSeek 鲸鱼形象 | **非本仓库所有**，见下 |
+
+《明日方舟》相关画面由本仓库作者按**公开、非盈利**的方式作为示例收录。**权利人或其代理人如有异议，开 issue 说明即会移除。**
+
+**这些素材不在本仓库的 MIT 许可范围内。** 如果你要再分发或商用，请自行向权利人确认——不要把这一段当作授权。
+
+`media/` 里的转码版本（`PRTS启动-10秒.mp4`、`普鲸声音重叠.mp4`）由原始 4K HEVC 转成 1080p H.264，细节见 [media/README.md](media/README.md)。
 
 ### 与上游的关系
 
