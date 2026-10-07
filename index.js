@@ -71,6 +71,29 @@ const STATE_DIRNAME = 'dsh-splash-animation'
 const BUNDLED_MEDIA = join(PACKAGE_DIR, 'assets', 'default.mp4')
 
 /**
+ * The clips this package ships and draws from when nothing else is configured.
+ *
+ * Two roles, and the difference between them is the whole feature:
+ *
+ *   - `primary` — the opener. The FIRST splash of a fresh install is always this
+ *     one, so a first impression is deliberate instead of a coin toss.
+ *   - `hidden` — an easter egg. It is in the draw from the very beginning, so it
+ *     can come up on any later start, but it is NOT listed in the settings page
+ *     until it has actually played once. Finding it in the list is the reward for
+ *     having seen it on screen.
+ *
+ * A clip that is missing from the package is skipped, not fatal: the pool is a
+ * convenience and the install must still boot.
+ */
+const BUNDLED_CLIPS = [
+  { name: 'PRTS启动-10秒.mp4', primary: true },
+  { name: '普鲸声音重叠.mp4', hidden: true },
+]
+
+/** Where the shipped clips live: the same folder the README points users at. */
+const BUNDLED_CLIP_DIR = join(PACKAGE_DIR, 'media')
+
+/**
  * The media that should play, honouring the three-state `src` rule.
  *
  * Order of precedence:
@@ -153,11 +176,88 @@ function eligibleEntries(settings, dshHome) {
  * @param pick - random source in [0, 1); injectable for the test suite.
  * @returns the reference to resolve.
  */
-export function pickEffectiveSource(settings, dshHome, pick = Math.random) {
-  const folder = typeof settings?.folder === 'string' ? settings.folder.trim() : ''
-  const entries = eligibleEntries(settings, dshHome)
-  if (entries.length === 0) return folder === '' ? settings?.src : ''
-  if (settings?.random !== true) return join(entries[0].root, entries[0].name)
+/**
+ * The shipped clips that are actually present, in pool order.
+ *
+ * A clip the package does not contain is skipped rather than fatal: the pool is a
+ * convenience, and an install missing one file must still boot.
+ *
+ * @param dshHome - absolute DSH home directory.
+ * @returns one entry per shipped clip that resolves, tagged with its role.
+ */
+export function bundledClipEntries(dshHome) {
+  const entries = []
+  for (const clip of BUNDLED_CLIPS) {
+    const media = resolveMedia(join(BUNDLED_CLIP_DIR, clip.name), dshHome)
+    if (media.configured !== true || media.problem !== undefined) continue
+    entries.push({
+      root: BUNDLED_CLIP_DIR,
+      name: clip.name,
+      bytes: media.bytes,
+      primary: clip.primary === true,
+      hidden: clip.hidden === true,
+    })
+  }
+  return entries
+}
+
+/**
+ * The shipped clips as the settings page should list them.
+ *
+ * The opener is always listed. A hidden clip is listed only once it has actually
+ * played — that IS the reveal, and it is the whole point of the feature: you find
+ * it in the list because you already saw it on screen.
+ *
+ * @param dshHome - absolute DSH home directory.
+ * @returns entries shaped like `listLibrary`'s, plus `shipped` and `primary`.
+ */
+export function shippedLibrary(dshHome) {
+  const unlocked = readState(dshHome).unlocked
+  const revealed = Array.isArray(unlocked) ? unlocked.filter((name) => typeof name === 'string') : []
+  return bundledClipEntries(dshHome)
+    .filter((entry) => entry.hidden !== true || revealed.includes(entry.name))
+    .map((entry) => {
+      const extension = extensionOf(entry.name)
+      return {
+        name: entry.name,
+        extension,
+        kind: IMAGE_KIND.has(extension) ? 'image' : 'video',
+        bytes: entry.bytes,
+        shipped: true,
+        primary: entry.primary === true,
+      }
+    })
+}
+
+/**
+ * Relabel a resolved descriptor when the winner is a shipped clip.
+ *
+ * Picking one out of the pool produces a path, and a path always resolves as
+ * `chosen` — but a shipped clip is not a user choice, and saying it is would make
+ * the page claim the user had configured something they never touched. It also
+ * feeds `chosen`, which is what tells the page whether an explicit decision
+ * exists yet.
+ *
+ * @param media - a descriptor from `resolveEffectiveMedia`.
+ * @param dshHome - absolute DSH home directory.
+ * @returns the descriptor, relabelled when it is a shipped clip.
+ */
+export function labelShipped(media, dshHome) {
+  if (media?.source !== 'chosen') return media
+  const shipped = bundledClipEntries(dshHome).some((entry) => entry.name === media.name)
+  return shipped ? { ...media, source: 'shipped' } : media
+}
+
+/**
+ * Pick one entry from a list: the first when not random, else a bounded draw.
+ *
+ * @param entries - the candidates, in order.
+ * @param random - the `random` setting.
+ * @param pick - random source, injectable for tests.
+ * @returns the chosen entry.
+ */
+function drawFrom(entries, random, pick) {
+  if (random !== true) return entries[0]
   // `pick` is a test seam; a caller-supplied one must not be able to take the
   // page load down with it, so a throw falls back to the first entry.
   let raw = 0
@@ -167,8 +267,74 @@ export function pickEffectiveSource(settings, dshHome, pick = Math.random) {
     raw = 0
   }
   const bounded = Number.isFinite(raw) ? Math.min(Math.max(raw, 0), 0.999999) : 0
-  const chosen = entries[Math.floor(bounded * entries.length)]
-  return join(chosen.root, chosen.name)
+  return entries[Math.floor(bounded * entries.length)]
+}
+
+/**
+ * Draw from the shipped pool.
+ *
+ * The first splash of an install is always the opener, so the very first
+ * impression is deliberate. After that the pool is drawn normally — **including
+ * any hidden clip**, which is what lets the easter egg appear before it is ever
+ * listed in the settings page.
+ *
+ * @param entries - the shipped clips that resolve.
+ * @param random - the `random` setting.
+ * @param pick - random source, injectable for tests.
+ * @param plays - how many times a shipped clip has been served before.
+ * @returns the chosen entry, or `undefined` when the pool is empty.
+ */
+function drawFromPool(entries, random, pick, plays) {
+  if (entries.length === 0) return undefined
+  const opener = entries.find((entry) => entry.primary === true) ?? entries[0]
+  if (plays <= 0) return opener
+  return drawFrom(entries, random, pick)
+}
+
+/**
+ * Which media reference should play, before it is resolved.
+ *
+ * Order of precedence:
+ *   1. A configured folder draws from the files ticked inside it.
+ *   2. Otherwise a single legacy `src` path, if one was ever chosen.
+ *   3. Otherwise — nothing configured at all — the shipped pool draws, and its
+ *      first play is always the opener.
+ *
+ * A folder that is set but has nothing ticked stays "play nothing": an empty tick
+ * list is a decision, not an invitation to substitute something else.
+ *
+ * @param settings - the effective configuration.
+ * @param dshHome - absolute DSH home directory.
+ * @param pick - random source, injectable for tests.
+ * @param pool - `{ entries, plays }` describing the shipped clips.
+ * @returns the reference to resolve.
+ */
+export function pickEffectiveSource(settings, dshHome, pick = Math.random, pool = {}) {
+  const folder = typeof settings?.folder === 'string' ? settings.folder.trim() : ''
+  const entries = eligibleEntries(settings, dshHome)
+  if (entries.length > 0) {
+    const chosen = drawFrom(entries, settings?.random, pick)
+    return join(chosen.root, chosen.name)
+  }
+  // `typeof src !== 'string'` is the "never chosen" state. An empty string is a
+  // deliberate clear and must keep meaning "play nothing"; `undefined` is a fresh
+  // install, which is what the shipped pool exists for.
+  if (folder === '' && typeof settings?.src !== 'string') {
+    const shipped = Array.isArray(pool?.entries) ? pool.entries : []
+    // Ticking a shipped clip narrows the pool, so the boxes in the settings page
+    // mean something for the shipped rows too. An empty tick list is not a veto
+    // here — it is the fresh-install state, where the pool has to play.
+    const ticked = Array.isArray(settings?.selected) ? settings.selected : []
+    const narrowed = ticked.length === 0 ? shipped : shipped.filter((entry) => ticked.includes(entry.name))
+    const chosen = drawFromPool(
+      narrowed.length > 0 ? narrowed : shipped,
+      settings?.random,
+      pick,
+      Number(pool?.plays) || 0,
+    )
+    if (chosen !== undefined) return join(chosen.root, chosen.name)
+  }
+  return folder === '' ? settings?.src : ''
 }
 
 /**
@@ -197,6 +363,13 @@ export function resolveRequestedMedia(settings, dshHome, requested) {
   // the page a URL the media route answered 404 for, i.e. no splash at all.
   const announced = resolveEffectiveMedia(settings?.src, dshHome)
   if (announced.source === 'bundled' && announced.name === requested) return announced
+  // A shipped clip. The configuration route draws one whenever the user has
+  // configured nothing, so the media route has to be able to serve it.
+  const shipped = bundledClipEntries(dshHome).find((entry) => entry.name === requested)
+  if (shipped !== undefined) {
+    const media = resolveEffectiveMedia(join(shipped.root, shipped.name), dshHome)
+    if (media.configured === true && media.problem === undefined) return media
+  }
   return undefined
 }
 
@@ -657,6 +830,49 @@ function readState(dshHome) {
   } catch {
     return {}
   }
+}
+
+/**
+ * Record that a shipped clip was actually served, and reveal a hidden one.
+ *
+ * Called from the media route rather than from the configuration route, because
+ * serving the bytes is the only proof the clip really played: the settings page
+ * fetches the configuration too, and counting that would let merely opening the
+ * settings page consume the first-play rule or unlock the easter egg.
+ *
+ * @param dshHome - absolute DSH home directory.
+ * @param name - the file name the media route just served.
+ */
+function recordBundledPlay(dshHome, name) {
+  const clip = BUNDLED_CLIPS.find((entry) => entry.name === name)
+  if (clip === undefined) return
+  const state = readState(dshHome)
+  const plays = Number.isInteger(state.plays) && state.plays >= 0 ? state.plays : 0
+  const stored = Array.isArray(state.unlocked) ? state.unlocked.filter((entry) => typeof entry === 'string') : []
+  const patch = { plays: plays + 1 }
+  // Playing it IS the reveal: from here on the settings page lists it.
+  if (clip.hidden === true && !stored.includes(name)) patch.unlocked = [...stored, name]
+  try {
+    patchState(dshHome, patch)
+  } catch {
+    // Losing the count is survivable: the worst case is the opener playing once
+    // more, or the egg staying hidden one launch longer.
+  }
+}
+
+/**
+ * Write the state file atomically, replacing only the keys given.
+ *
+ * @param dshHome - absolute DSH home directory.
+ * @param patch - the keys to merge in.
+ */
+function patchState(dshHome, patch) {
+  const file = stateFile(dshHome)
+  const temporary = `${file}.tmp`
+  const next = { ...readState(dshHome), ...patch }
+  mkdirSync(join(dshHome, STATE_DIRNAME), { recursive: true })
+  writeFileSync(temporary, `${JSON.stringify(next, null, 2)}\n`, 'utf8')
+  renameSync(temporary, file)
 }
 
 /**
@@ -1219,6 +1435,18 @@ export function apply(ctx, rawConfig, options = {}) {
     return normalizeConfig(merged)
   }
 
+  /**
+   * The shipped pool, plus how many times it has been served.
+   *
+   * Read per request for the same reason `settings()` is: a page load has to see
+   * the count the previous splash left behind, or the opener would play forever
+   * and the pool would never be drawn.
+   */
+  const pool = () => ({
+    entries: bundledClipEntries(dshHome),
+    plays: Number(readState(dshHome).plays) || 0,
+  })
+
   // Suppress the shell's own boot layer while our splash owns the screen, and
   // cover the application until the splash has painted.
   //
@@ -1338,7 +1566,7 @@ export function apply(ctx, rawConfig, options = {}) {
       handler: (req, res) => {
         if (guard(req, res)) return
         const effective = settings()
-        const media = resolveEffectiveMedia(pickEffectiveSource(effective, dshHome), dshHome)
+        const media = labelShipped(resolveEffectiveMedia(pickEffectiveSource(effective, dshHome, Math.random, pool()), dshHome), dshHome)
         const view = legacyFolderView(effective)
         res.writeHead(200, {
           'Content-Type': 'application/json; charset=utf-8',
@@ -1372,9 +1600,9 @@ export function apply(ctx, rawConfig, options = {}) {
            * rather than an empty box that contradicts it. Saving clears the
            * `bundled` source, which is what "the user has now chosen" means.
            */
-          effectiveSrc: media.configured === true
-            ? (media.source === 'bundled' ? BUNDLED_MEDIA : effective.src)
-            : '',
+          effectiveSrc: media.source === 'bundled'
+            ? BUNDLED_MEDIA
+            : (media.source === 'chosen' && media.configured === true ? (effective.src ?? '') : ''),
           /** True once the user has chosen (or explicitly cleared) something. */
           chosen: media.source === 'chosen' || media.source === 'cleared',
           /**
@@ -1384,7 +1612,7 @@ export function apply(ctx, rawConfig, options = {}) {
            * the page already fetches this one, and a second round trip would only
            * add a way for the two to disagree.
            */
-          library: listLibrary(effective.folder, dshHome),
+          library: [...shippedLibrary(dshHome), ...listLibrary(effective.folder, dshHome)],
           /**
            * The folder and tick list as the page should show them.
            *
@@ -1441,7 +1669,7 @@ export function apply(ctx, rawConfig, options = {}) {
         // Saving — including saving an empty path — records an explicit choice, so
         // the bundled default no longer applies afterwards. That is what makes
         // "clear it and it stops playing" true.
-        const media = resolveEffectiveMedia(pickEffectiveSource(settings(), dshHome), dshHome)
+        const media = labelShipped(resolveEffectiveMedia(pickEffectiveSource(settings(), dshHome, Math.random, pool()), dshHome), dshHome)
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' })
         res.end(JSON.stringify({
           ok: true,
@@ -1580,6 +1808,15 @@ export function apply(ctx, rawConfig, options = {}) {
         if (media === undefined) {
           notFound(res)
           return
+        }
+        // Count the play here, not in the configuration route: serving the bytes
+        // is the only proof the clip really played, and the settings page reads
+        // the configuration too. A ranged request continues a playback that has
+        // already been counted, so only a fresh one (no Range, or one starting at
+        // byte 0) counts.
+        const range = req.headers?.range
+        if (typeof range !== 'string' || /^bytes=0-/.test(range.trim())) {
+          recordBundledPlay(dshHome, media.name)
         }
         serveMedia(req, res, media)
       },

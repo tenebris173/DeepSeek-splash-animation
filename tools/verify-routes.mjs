@@ -226,17 +226,32 @@ console.log('\nthe engage gate: never configured')
   check(config.json?.settings?.src === undefined, 'src stays undefined, which is the "never chosen" state', JSON.stringify(config.json?.settings?.src))
 
   // The three-state rule: an unset src engages only if the package ships a default.
+  //
+  // `shipped` is this fork's third answer and is what a fresh install normally
+  // reports: with nothing configured, the draw comes from the clips the package
+  // ships in `media/` (opener first, then a random one). `bundled` still appears
+  // when only `assets/default.mp4` is present.
   const source = config.json?.source
-  check(source === 'bundled' || source === 'unset', 'the source is bundled or unset, never "cleared"', String(source))
-  if (source === 'bundled') {
-    check(config.json.media.kind === 'video', 'with a bundled default it reports playable media', JSON.stringify(config.json.media))
-    check(config.json.effectiveSrc === config.json.media.name || String(config.json.effectiveSrc).endsWith('default.mp4'), 'and the settings page is told which file to prefill', String(config.json.effectiveSrc))
+  check(
+    source === 'shipped' || source === 'bundled' || source === 'unset',
+    'the source is shipped, bundled or unset, never "cleared"',
+    String(source),
+  )
+  if (source === 'shipped' || source === 'bundled') {
+    check(config.json.media.kind === 'video', 'a shipped default reports playable media', JSON.stringify(config.json.media))
     check(config.json.chosen === false, 'while the user has still chosen nothing', String(config.json.chosen))
+    if (source === 'shipped') {
+      check(config.json.effectiveSrc === '', 'and no folder is prefilled, because none was configured', JSON.stringify(config.json.effectiveSrc))
+    } else {
+      check(config.json.effectiveSrc === config.json.media.name || String(config.json.effectiveSrc).endsWith('default.mp4'), 'and the settings page is told which file to prefill', String(config.json.effectiveSrc))
+    }
 
-    // The bundled file is served just like a chosen one.
-    const bundled = await call(routeAt(routes, MEDIA), { url: `${MEDIA}/default.mp4` })
-    check(bundled.status === 200, 'the bundled default is served by the media route', String(bundled.status))
-    check(bundled.headers['Content-Type'] === 'video/mp4', 'with its real MIME type', String(bundled.headers['Content-Type']))
+    // Whatever it announced is what the media route serves. Asserting the exact
+    // name matters here: the answer is no longer a fixed `default.mp4`, so a route
+    // that only served that one would hand the page a 404.
+    const announced = await call(routeAt(routes, MEDIA), { url: `${MEDIA}/${encodeURIComponent(config.json.media.name)}` })
+    check(announced.status === 200, 'the announced default is served by the media route', String(announced.status))
+    check(announced.headers['Content-Type'] === 'video/mp4', 'with its real MIME type', String(announced.headers['Content-Type']))
   } else {
     const media = await call(routeAt(routes, MEDIA), { url: `${MEDIA}/default.mp4` })
     check(media.status === 404, 'with no bundled default the media route serves nothing', String(media.status))
@@ -245,7 +260,17 @@ console.log('\nthe engage gate: never configured')
   // Whatever the default is, only the configured name is ever served.
   const other = await call(routeAt(routes, MEDIA), { url: `${MEDIA}/anything.mp4` })
   check(other.status === 404, 'a name that is not the active media is refused', String(other.status))
-  check(!existsSync(join(home, 'dsh-splash-animation', 'config.json')), 'mounting writes no state file')
+  // Serving a shipped clip is what records the play, and that record is what makes
+  // the first start always the opener and remembers that the easter egg was seen.
+  // Mounting on its own still writes nothing — the file only appears once a clip
+  // has actually been served, which the call above just did.
+  const state = JSON.parse(readFileSync(join(home, 'dsh-splash-animation', 'config.json'), 'utf8'))
+  if (source === 'shipped') {
+    check(Number.isInteger(state.plays) && state.plays >= 1, 'serving a shipped clip recorded the play', JSON.stringify(state.plays))
+  } else {
+    check(state.plays === undefined, 'nothing was counted when no shipped clip was served', JSON.stringify(state.plays))
+    check(state.unlocked === undefined, 'and nothing was revealed', JSON.stringify(state.unlocked))
+  }
 }
 
 console.log('\nclearing: an explicit decision that outranks the default')
