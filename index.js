@@ -230,6 +230,48 @@ export function shippedLibrary(dshHome) {
 }
 
 /**
+ * Compare two paths the way the platform does.
+ *
+ * Windows paths are case-insensitive, so `C:\Media\x.mp4` and `c:\media\x.mp4`
+ * are the same file.
+ *
+ * @param a - one path.
+ * @param b - the other path.
+ * @returns true when they point at the same file.
+ */
+function samePath(a, b) {
+  const left = resolve(a)
+  const right = resolve(b)
+  if (left === right) return true
+  return process.platform === 'win32' && left.toLowerCase() === right.toLowerCase()
+}
+
+/**
+ * Is this resolved file the package's OWN copy of a shipped clip?
+ *
+ * The file name alone is not enough, and assuming it was is a real mistake: the
+ * README tells users to copy these clips into their own media folder, so a file
+ * with the same name is usually the USER's copy. Treating that copy as shipped
+ * spends the first-start slot (the opener stops being guaranteed), reveals the
+ * easter egg for a file that never came from the package, and labels a file the
+ * user chose as something the package provided.
+ *
+ * A user who points their folder straight at the package's `media/` still counts:
+ * the same file is being served, whichever route the path arrived by.
+ *
+ * @param media - a resolved descriptor.
+ * @param dshHome - absolute DSH home directory.
+ * @returns true when the served path is the package's own file.
+ */
+export function isShippedClip(media, dshHome) {
+  const name = media?.name
+  if (typeof name !== 'string' || typeof media?.path !== 'string') return false
+  const clip = BUNDLED_CLIPS.find((entry) => entry.name === name)
+  if (clip === undefined) return false
+  return samePath(media.path, join(BUNDLED_CLIP_DIR, clip.name))
+}
+
+/**
  * Relabel a resolved descriptor when the winner is a shipped clip.
  *
  * Picking one out of the pool produces a path, and a path always resolves as
@@ -244,8 +286,7 @@ export function shippedLibrary(dshHome) {
  */
 export function labelShipped(media, dshHome) {
   if (media?.source !== 'chosen') return media
-  const shipped = bundledClipEntries(dshHome).some((entry) => entry.name === media.name)
-  return shipped ? { ...media, source: 'shipped' } : media
+  return isShippedClip(media, dshHome) ? { ...media, source: 'shipped' } : media
 }
 
 /**
@@ -840,10 +881,15 @@ function readState(dshHome) {
  * fetches the configuration too, and counting that would let merely opening the
  * settings page consume the first-play rule or unlock the easter egg.
  *
+ * The check is on the PATH, not the file name — see `isShippedClip` for what a
+ * name-only match gets wrong.
+ *
  * @param dshHome - absolute DSH home directory.
- * @param name - the file name the media route just served.
+ * @param media - the descriptor the media route just served.
  */
-function recordBundledPlay(dshHome, name) {
+function recordBundledPlay(dshHome, media) {
+  if (!isShippedClip(media, dshHome)) return
+  const name = media.name
   const clip = BUNDLED_CLIPS.find((entry) => entry.name === name)
   if (clip === undefined) return
   const state = readState(dshHome)
@@ -1816,7 +1862,7 @@ export function apply(ctx, rawConfig, options = {}) {
         // byte 0) counts.
         const range = req.headers?.range
         if (typeof range !== 'string' || /^bytes=0-/.test(range.trim())) {
-          recordBundledPlay(dshHome, media.name)
+          recordBundledPlay(dshHome, media)
         }
         serveMedia(req, res, media)
       },
