@@ -1279,7 +1279,14 @@ function readJsonBody(req, limit) {
     })
     req.on('end', () => {
       try {
-        finish(JSON.parse(Buffer.concat(chunks).toString('utf8')))
+        const parsed = JSON.parse(Buffer.concat(chunks).toString('utf8'))
+        // Only a JSON OBJECT counts as a body. `null`, an array and a bare scalar
+        // all parse successfully, and passing one of those on made `body.src` throw
+        // inside the save route — a stray `POST null` became an unhandled error in
+        // the handler. The contract above has always said "undefined when it is not
+        // JSON"; this makes that true for the values that are JSON but not a body.
+        const usable = parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)
+        finish(usable ? parsed : undefined)
       } catch {
         finish(undefined)
       }
