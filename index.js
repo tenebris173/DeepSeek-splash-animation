@@ -296,8 +296,10 @@ export function poolState(dshHome) {
  * easter egg for a file that never came from the package, and labels a file the
  * user chose as something the package provided.
  *
- * A user who points their folder straight at the package's `media/` still counts:
- * the same file is being served, whichever route the path arrived by.
+ * Note that COUNTING is a separate question, decided by the media route: the pool's
+ * counters only move while the pool is what plays, so pointing a folder at the
+ * package's `media/` serves the same bytes without spending the first-start rule.
+ * The easter egg belongs to the pool, not to a file that happens to share its name.
  *
  * @param media - a resolved descriptor.
  * @param dshHome - absolute DSH home directory.
@@ -812,11 +814,17 @@ function extensionOf(file) {
  *
  * `~` and relative paths are supported because a user pasting a path into the
  * settings box should not have to spell out an absolute Windows path.
+ *
+ * A BARE `~` means the home directory too. It used to fall through to the relative
+ * branch and resolve to `<DSH_HOME>/~`, which is not what anyone means by it — the
+ * documented behaviour and the implemented one disagreed on exactly that spelling.
+ *
  * @param reference - the configured `src`.
  * @param dshHome - absolute DSH home directory.
  * @returns the absolute candidate path.
  */
 function toAbsolutePath(reference, dshHome) {
+  if (reference === '~') return homedir()
   if (reference.startsWith('~/') || reference.startsWith('~\\')) return join(homedir(), reference.slice(2))
   if (isAbsolute(reference)) return resolve(reference)
   return resolve(dshHome, reference)
@@ -863,6 +871,16 @@ export function resolveMedia(src, dshHome) {
   }
   if (!stats.isFile()) return { configured: true, problem: 'not-a-file', extension, path }
   if (mime === undefined) return { configured: true, problem: 'unsupported-format', extension, path }
+  // A zero-byte file is not playable, and serving one CRASHED the route: the
+  // response headers went out as 200 and then `createReadStream` was handed
+  // `end: -1`, which throws ERR_OUT_OF_RANGE after the headers are already on the
+  // wire — the connection could only be destroyed, so the browser saw a dead socket
+  // instead of an error it could report. Rejecting it here keeps it out of the
+  // listing AND out of the media route.
+  //
+  // Real installs hit this: Windows copies a file by truncating it first, so a clip
+  // being copied is 0 bytes for a moment, and an interrupted `--fetch` leaves one.
+  if (stats.size === 0) return { configured: true, problem: 'empty-file', extension, path }
   if (stats.size > MAX_MEDIA_BYTES) return { configured: true, problem: 'file-too-large', extension, path }
 
   return {
@@ -1033,6 +1051,27 @@ function startsPlayback(method, headers) {
 const PROBE_RANGE_BYTES = 65536
 
 /**
+ * A temporary path for an atomic write that no other process can collide with.
+ *
+ * The name used to be a fixed `${file}.tmp`, and `$DSH_HOME` is global rather than
+ * per-profile — so the desktop app and a CLI host can run at the same time and write
+ * this very file. Two processes then shared one scratch name: A wrote it, B
+ * overwrote it, A renamed it into place (publishing B's contents), and B's rename
+ * found nothing to move and failed. Measured at 110 of 240 saves returning 500, with
+ * 30 replies describing the other process's settings.
+ *
+ * @param file - the destination path.
+ * @returns a unique sibling path.
+ */
+function tempPathFor(file) {
+  tempCounter += 1
+  return `${file}.${process.pid}.${tempCounter}.tmp`
+}
+
+/** Monotonic part of the temp name; unique within a process, and the pid is not. */
+let tempCounter = 0
+
+/**
  * Is this configured folder an existing FILE rather than a directory?
  *
  * Used to refuse storing one: see `writeState` for what a file-as-folder costs.
@@ -1059,11 +1098,18 @@ function isExistingFile(folder, dshHome) {
  */
 function patchState(dshHome, patch) {
   const file = stateFile(dshHome)
-  const temporary = `${file}.tmp`
+  const temporary = tempPathFor(file)
   const next = { ...readState(dshHome), ...patch }
   mkdirSync(join(dshHome, STATE_DIRNAME), { recursive: true })
-  writeFileSync(temporary, `${JSON.stringify(next, null, 2)}\n`, 'utf8')
-  renameSync(temporary, file)
+  try {
+    writeFileSync(temporary, `${JSON.stringify(next, null, 2)}\n`, 'utf8')
+    renameSync(temporary, file)
+  } catch (error) {
+    // A failed rename leaves the scratch file behind forever otherwise — a read-only
+    // home, or a state path that is a directory, is enough to do it.
+    try { unlinkSync(temporary) } catch { /* nothing else to do */ }
+    throw error
+  }
 }
 
 /**
@@ -1082,7 +1128,7 @@ function writeState(dshHome, src, switches, extras) {
   const dir = join(dshHome, STATE_DIRNAME)
   mkdirSync(dir, { recursive: true })
   const file = stateFile(dshHome)
-  const temporary = `${file}.tmp`
+  const temporary = tempPathFor(file)
   const next = { ...readState(dshHome) }
   // Only a string replaces the stored path. `undefined` means the request said
   // nothing about it, and leaving it untouched is the whole point: see the save
@@ -1116,8 +1162,15 @@ function writeState(dshHome, src, switches, extras) {
   // reappear as the fallback if the folder is later emptied. Only when a folder was
   // actually stored — refusing one must not also destroy the path it failed on.
   if (folder !== undefined && folder !== '' && folderUsable) next.src = ''
-  writeFileSync(temporary, `${JSON.stringify(next, null, 2)}\n`, 'utf8')
-  renameSync(temporary, file)
+  try {
+    writeFileSync(temporary, `${JSON.stringify(next, null, 2)}\n`, 'utf8')
+    renameSync(temporary, file)
+  } catch (error) {
+    // A failed rename leaves the scratch file behind forever otherwise — a read-only
+    // home, or a state path that is a directory, is enough to do it.
+    try { unlinkSync(temporary) } catch { /* nothing else to do */ }
+    throw error
+  }
 }
 
 /** Slack added to the splash's own estimate before the safety release fires. */
@@ -1315,6 +1368,15 @@ function serveMedia(req, res, media) {
   }
 
   const seekable = SEEKABLE.has(media.mime)
+  // Belt and braces. `resolveMedia` now refuses a zero-byte file, so this should be
+  // unreachable — but the failure mode it guards is a thrown exception AFTER the 200
+  // headers are on the wire, which no caller can recover from, so it is worth the
+  // four lines to make it impossible.
+  if (!(media.bytes > 0)) {
+    res.writeHead(200, { ...headers, 'Content-Length': '0' })
+    res.end()
+    return
+  }
   const range = seekable ? parseRange(req.headers.range, media.bytes) : undefined
   if (seekable && req.headers.range !== undefined && range === undefined) {
     res.writeHead(416, { ...headers, 'Content-Range': `bytes */${media.bytes}` })
@@ -1360,6 +1422,8 @@ function readJsonBody(req, limit) {
     const chunks = []
     let size = 0
     let settled = false
+    /** Set once the body passes the ceiling; the rest is drained, not parsed. */
+    let oversized = false
     const finish = (value) => {
       if (settled) return
       settled = true
@@ -1368,13 +1432,23 @@ function readJsonBody(req, limit) {
     req.on('data', (chunk) => {
       size += chunk.length
       if (size > limit) {
-        finish(undefined)
-        req.destroy()
+        // Refuse the body, but DO NOT destroy the request. A destroyed request has no
+        // socket left to answer on, so the handler's 400 never reached the client:
+        // measured as "no response at all" at the limit and ECONNRESET at 1 MiB, which
+        // the settings page could only render as a generic read failure. Draining the
+        // rest keeps the connection alive long enough to say what went wrong.
+        oversized = true
+        chunks.length = 0
         return
       }
+      if (oversized) return
       chunks.push(chunk)
     })
     req.on('end', () => {
+      if (oversized) {
+        finish(undefined)
+        return
+      }
       try {
         const parsed = JSON.parse(Buffer.concat(chunks).toString('utf8'))
         // Only a JSON OBJECT counts as a body. `null`, an array and a bare scalar
@@ -1879,6 +1953,13 @@ export function apply(ctx, rawConfig, options = {}) {
       path: CONFIG_ROUTE,
       handler: (req, res) => {
         if (guard(req, res)) return
+        // Read-only, and only by GET: it answered every method with 200 before, which
+        // made a stray POST look like it had done something.
+        if (req.method !== 'GET' && req.method !== 'HEAD') {
+          res.writeHead(405, { Allow: 'GET, HEAD' })
+          res.end()
+          return
+        }
         const effective = settings()
         const media = labelShipped(resolveEffectiveMedia(pickEffectiveSource(effective, dshHome, Math.random, pool()), dshHome), dshHome)
         res.writeHead(200, {
@@ -1921,6 +2002,15 @@ export function apply(ctx, rawConfig, options = {}) {
         const switches = {}
         for (const key of SWITCH_KEYS) {
           if (typeof body[key] === 'boolean') switches[key] = body[key]
+        }
+        // A folder that is really a file is refused by `writeState`, and saying
+        // "saved" while the stored value did not move is worse than saying nothing:
+        // the page would show the new path and the splash would keep using the old
+        // one. Answer with the reason instead.
+        if (typeof body.folder === 'string' && body.folder.trim() !== '' && isExistingFile(body.folder, dshHome)) {
+          res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' })
+          res.end(JSON.stringify({ ok: false, error: 'folder-not-a-directory' }))
+          return
         }
         try {
           writeState(dshHome, src, switches, { folder: body.folder, selected: body.selected, skip: body.skip })

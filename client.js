@@ -208,6 +208,7 @@ window.__ModuleLoader__.load({
           'unreadable-file': '这个文件读不出来。',
           'not-a-file': '这个路径不是一个文件。',
           'file-too-large': '文件超过 4 GiB 上限。',
+          'empty-file': '这个文件是 0 字节，还没有内容。复制或下载可能还没完成。',
           'codec-unsupported': '容器能读，但里面的编码格式当前 Electron 不支持，转码成 H.264 或 VP9 即可。',
           'load-failed': '读不到插件配置。',
           'save-failed': '保存失败，改动没有生效。',
@@ -276,6 +277,7 @@ window.__ModuleLoader__.load({
           'unreadable-file': 'That file could not be read.',
           'not-a-file': 'That path is not a file.',
           'file-too-large': 'The file exceeds the 4 GiB limit.',
+          'empty-file': 'This file is 0 bytes — a copy or download probably has not finished.',
           'codec-unsupported': 'The container is readable but the codec inside it is not supported by this Electron build. Transcode to H.264 or VP9.',
           'load-failed': 'The plugin configuration could not be read.',
           'save-failed': 'Saving failed; nothing was changed.',
@@ -1234,7 +1236,11 @@ window.__ModuleLoader__.load({
           // to what the Host actually holds, and report the WRITE — the old code left
           // the box showing the new value and claimed it could not READ.
           await load()
-          setState((previous) => ({ ...previous, problem: 'save-failed' }))
+          // The Host names the reason when it has one (`folder-not-a-directory`);
+          // anything else is a plain write failure. Without this the page said
+          // "reading failed" for a refused save and the user had nothing to act on.
+          const named = typeof result.error === 'string' && t.problem[result.error] !== undefined
+          setState((previous) => ({ ...previous, problem: named ? result.error : 'save-failed' }))
           return
         }
         await load()

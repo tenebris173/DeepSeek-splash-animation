@@ -14,7 +14,7 @@
  * @module
  */
 
-import { existsSync, mkdirSync, statSync, writeFileSync } from 'node:fs'
+import { mkdirSync, renameSync, statSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 
@@ -34,10 +34,30 @@ const SOURCE = {
  * they appear in the settings list where a bare number says nothing.
  */
 const CLIPS = [
-  { source: 'assets/videos/1.mp4', name: '开机动画1-8秒.mp4' },
-  { source: 'assets/videos/2.mp4', name: '开机动画2-15秒.mp4' },
-  { source: 'assets/videos/3.mp4', name: '开机动画3-12秒.mp4' },
+  { source: 'assets/videos/1.mp4', name: '开机动画1-8秒.mp4', bytes: 8391471 },
+  { source: 'assets/videos/2.mp4', name: '开机动画2-15秒.mp4', bytes: 11065265 },
+  { source: 'assets/videos/3.mp4', name: '开机动画3-12秒.mp4', bytes: 5195581 },
 ]
+
+/**
+ * Is the file already downloaded, as opposed to merely present?
+ *
+ * Existence alone is not enough, and treating it as enough was a real trap: an
+ * interrupted download, a Ctrl-C, or a text file that happens to carry the right
+ * name all counted as "already there" and were never fetched again. A media file
+ * with no bytes is also exactly what makes the player refuse to serve it.
+ *
+ * @param path - the destination.
+ * @returns the size when the file is usable, else 0.
+ */
+function usableSize(path) {
+  try {
+    const stats = statSync(path)
+    return stats.isFile() && stats.size > 0 ? stats.size : 0
+  } catch {
+    return 0
+  }
+}
 
 /** Where the plugin keeps media: the same folder its own settings page points at. */
 function mediaDir() {
@@ -54,7 +74,7 @@ function size(bytes) {
  * Print what the optional clips are, who made them, and how to get them.
  */
 function notice() {
-  const total = CLIPS.reduce((sum, clip) => sum + clip.bytes, 0)
+  const total = CLIPS.reduce((sum, clip) => sum + (typeof clip.bytes === 'number' ? clip.bytes : 0), 0)
   const lines = [
     '',
     `  可选的第三方素材（未随插件安装，共 ${CLIPS.length} 段${total > 0 ? `，约 ${size(total)}` : ''}）`,
@@ -89,8 +109,9 @@ async function fetchClips() {
   let failed = 0
   for (const clip of CLIPS) {
     const destination = join(target, clip.name)
-    if (existsSync(destination)) {
-      process.stdout.write(`  已有，跳过  ${clip.name}  (${size(statSync(destination).size)})\n`)
+    const already = usableSize(destination)
+    if (already > 0) {
+      process.stdout.write(`  已有，跳过  ${clip.name}  (${size(already)})\n`)
       continue
     }
     const url = `https://raw.githubusercontent.com/${SOURCE.author}/${SOURCE.project}/${SOURCE.branch}/${clip.source}`
@@ -99,7 +120,11 @@ async function fetchClips() {
       if (!response.ok) throw new Error(`HTTP ${response.status}`)
       const bytes = Buffer.from(await response.arrayBuffer())
       if (bytes.length === 0) throw new Error('empty response')
-      writeFileSync(destination, bytes)
+      // Write to a scratch name and rename, so an interrupted run cannot leave a
+      // half file that the next run would then skip as "already there".
+      const partial = `${destination}.part`
+      writeFileSync(partial, bytes)
+      renameSync(partial, destination)
       process.stdout.write(`  已下载      ${clip.name}  (${size(bytes.length)})\n`)
     } catch (error) {
       failed += 1
