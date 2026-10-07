@@ -408,14 +408,17 @@ export function pickEffectiveSource(settings, dshHome, pick = Math.random, pool 
   // deliberate clear and must keep meaning "play nothing"; `undefined` is a fresh
   // install, which is what the shipped pool exists for.
   if (folder === '' && typeof settings?.src !== 'string') {
-    const shipped = Array.isArray(pool?.entries) ? pool.entries : []
-    // Ticking a shipped clip narrows the pool, so the boxes in the settings page
-    // mean something for the shipped rows too. An empty tick list is not a veto
-    // here — it is the fresh-install state, where the pool has to play.
-    const ticked = Array.isArray(settings?.selected) ? settings.selected : []
-    const narrowed = ticked.length === 0 ? shipped : shipped.filter((entry) => ticked.includes(entry.name))
+    // The pool draws from ALL shipped clips; the tick list deliberately does NOT
+    // narrow it. It used to, and that produced a closed loop: a fresh install lists
+    // only the opener (the egg is hidden until it plays), the page says "ticking
+    // none plays nothing", the natural move is to tick the one row you can see —
+    // and the pool then holds only the opener. The fourth start never becomes the
+    // egg, and the egg is never listed, because it never played. Nothing said so.
+    //
+    // The shipped clips are not a folder and are not governed by its rule, which is
+    // why the settings page now shows them in their own group, with no tick boxes.
     const chosen = drawFromPool(
-      narrowed.length > 0 ? narrowed : shipped,
+      Array.isArray(pool?.entries) ? pool.entries : [],
       settings?.random,
       pick,
       pool,
@@ -1005,6 +1008,10 @@ function writeState(dshHome, src, switches, extras) {
   // wipe the configuration it does not know about.
   if (typeof extras?.folder === 'string') next.folder = extras.folder.trim().slice(0, MAX_SRC_LENGTH)
   if (Array.isArray(extras?.selected)) next.selected = normalizeSelected(extras.selected)
+  // Enumerated settings the page can change, validated HERE rather than trusted:
+  // `normalizeConfig` would coerce a bad value back to the default on read, which
+  // would leave junk sitting in the file and the page showing something else.
+  if (typeof extras?.skip === 'string' && SKIP_MODES.has(extras.skip)) next.skip = extras.skip
   // A folder supersedes the single path: leaving the old one behind would let it
   // reappear as the fallback if the folder is later emptied.
   if (typeof extras?.folder === 'string' && extras.folder.trim() !== '') next.src = ''
@@ -1727,7 +1734,16 @@ export function apply(ctx, rawConfig, options = {}) {
            * the page already fetches this one, and a second round trip would only
            * add a way for the two to disagree.
            */
-          library: [...shippedLibrary(dshHome), ...listLibrary(effective.folder, dshHome)],
+          library: listLibrary(effective.folder, dshHome),
+          /**
+           * The clips the package ships, listed separately and NOT tickable.
+           *
+           * They used to be merged into `library`, which made one list carry two
+           * opposite meanings for "nothing ticked" — the folder's ("play nothing")
+           * and the pool's ("play everything") — under a heading that named only
+           * the folder. Splitting them is what removes the contradiction.
+           */
+          shipped: shippedLibrary(dshHome),
           /**
            * The folder and tick list as the page should show them.
            *
@@ -1774,7 +1790,7 @@ export function apply(ctx, rawConfig, options = {}) {
           if (typeof body[key] === 'boolean') switches[key] = body[key]
         }
         try {
-          writeState(dshHome, src, switches, { folder: body.folder, selected: body.selected })
+          writeState(dshHome, src, switches, { folder: body.folder, selected: body.selected, skip: body.skip })
         } catch (error) {
           ctx.logger.warn(`dsh-splash-animation: could not write the state file (${error.code ?? error.message})`)
           res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' })

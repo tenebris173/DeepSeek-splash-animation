@@ -157,12 +157,28 @@ window.__ModuleLoader__.load({
         libraryLabel: '文件夹里的素材',
         libraryEmpty: '这个文件夹里没有可播放的视频或动图。把文件放进去，再点「刷新」。',
         libraryHint: '打勾的会参与开屏播放；一个都不打勾就不播，DSH 直接启动。点整行即可切换。',
+        // The shipped clips are listed apart and are never ticked: the folder's
+        // rule ("ticking none plays nothing") is the opposite of the pool's
+        // ("nothing configured plays the pool"), so they cannot share a list.
+        shippedLabel: '插件自带的',
+        shippedCount: (total) => `${total} 段 · 自动参与，不用勾选`,
+        shippedOpener: '开场片',
+        shippedEgg: '彩蛋',
+        shippedHint: '这几段随插件提供，和上面的勾选无关：第一次开屏必定是开场片，开场片播满 3 次后第 4 次必定是彩蛋，之后回到随机。彩蛋在播过一次之前不会出现在这里——你能在清单里看到它，说明你已经在屏幕上见过它了。',
+        optionalLabel: '可选素材',
+        optionalHint: '另有 3 段第三方开机动画（作者 lxj5820，MIT 许可，来源 github.com/lxj5820/dsh-boot-animation）默认不安装。在插件目录运行 node tools/optional-media.mjs --fetch 下载，直接取自原作者的仓库。',
         libraryCount: (picked, total) => `已勾选 ${picked} / 共 ${total}`,
         kindVideo: '视频',
         kindImage: '动图',
         reloadLibrary: '刷新',
         tailLabel: '片尾交叉溶解',
         tailHint: '开启后，淡出在影片结束前 fadeOutMs 就开始，影片还在演的时候界面已在下面透出来，交接正好落在最后一帧。关闭维持原样：整段播完、停在最后一帧，再淡出（两者之间可留 holdAfterEndMs）。影片设为重复播放时本项不生效，避免截断重播。',
+        skipLabel: '跳过方式',
+        skipButton: '右下角按钮（默认）',
+        skipClick: '点画面任意位置',
+        skipAuto: '自动跳过',
+        skipNever: '不能跳过',
+        skipHint: '默认是右下角那个按钮，不是点任意位置。',
         soundLabel: '播放声音',
         soundHint: '开启后开屏影片带声音播放。宿主本身并不限制自动播放带声音的媒体，所以这一项默认关闭只是插件自己的保守选择——打开就能出声。影片自己没有音轨时这项没有效果。',
         randomLabel: '随机播放',
@@ -204,12 +220,25 @@ window.__ModuleLoader__.load({
         libraryLabel: 'Files in the folder',
         libraryEmpty: 'No playable video or image in this folder. Put files there and press Refresh.',
         libraryHint: 'Ticked files take part in the splash; ticking none plays nothing and DSH starts normally. Click a row to toggle it.',
+        shippedLabel: 'Shipped with the plugin',
+        shippedCount: (total) => `${total} · always in the draw, no ticking needed`,
+        shippedOpener: 'opener',
+        shippedEgg: 'easter egg',
+        shippedHint: 'These come with the plugin and are unaffected by the ticks above: the first start is always the opener, the fourth is always the egg once the opener has had three starts, and it is random after that. The egg is not listed here until it has played — seeing it in this list means you have already seen it on screen.',
+        optionalLabel: 'Optional clips',
+        optionalHint: 'Three more boot animations (by lxj5820, MIT, github.com/lxj5820/dsh-boot-animation) are deliberately not installed. Run node tools/optional-media.mjs --fetch in the plugin directory; the download comes straight from the author repository.',
         libraryCount: (picked, total) => `${picked} of ${total} ticked`,
         kindVideo: 'video',
         kindImage: 'image',
         reloadLibrary: 'Refresh',
         tailLabel: 'Tail cross-dissolve',
         tailHint: 'On, the dissolve starts fadeOutMs before the clip ends, so the clip is still playing while the interface comes through underneath and the hand-off lands on the last frame. Off keeps the previous behaviour: the clip plays out in full, holds its last frame, then dissolves (holdAfterEndMs is the gap). Has no effect while the clip repeats, which would otherwise be cut short.',
+        skipLabel: 'Skip with',
+        skipButton: 'Corner button (default)',
+        skipClick: 'Click anywhere',
+        skipAuto: 'Skip automatically',
+        skipNever: 'Not skippable',
+        skipHint: 'The default is the corner button, not clicking anywhere.',
         soundLabel: 'Play sound',
         soundHint: 'On, the splash clip plays with its audio. The host does not restrict autoplay of audible media, so off-by-default is this plugin\'s own conservative choice — turn it on and you will hear it. No effect when the clip has no audio track.',
         randomLabel: 'Play at random',
@@ -1012,8 +1041,18 @@ window.__ModuleLoader__.load({
        * here and nowhere else.
        */
       const [sound, setSound] = React.useState(false)
-      /** What the Host found in the folder: the only things that can be ticked. */
+      /** The skip mode: 'button' | 'click' | 'auto' | 'never'. */
+      const [skip, setSkip] = React.useState('button')
+      /** The folder's files: tickable, and ticking none means play nothing. */
       const [library, setLibrary] = React.useState([])
+      /**
+       * The clips the package ships: six of them at most, always in the draw.
+       *
+       * Kept apart from `library` because the two answer "nothing is ticked"
+       * differently — the folder says "play nothing", the pool says "play
+       * everything" — and one list cannot carry both meanings.
+       */
+      const [shipped, setShipped] = React.useState([])
       /** Ticked file NAMES. Empty means "play nothing" — ticking is what makes a file eligible. */
       const [selected, setSelected] = React.useState([])
       const switches = { tailDissolve: tail, startMaximized: maximized, random, muted: !sound }
@@ -1024,6 +1063,7 @@ window.__ModuleLoader__.load({
       const refreshLibrary = async () => {
         const result = await payload()
         setLibrary(Array.isArray(result?.library) ? result.library : [])
+        setShipped(Array.isArray(result?.shipped) ? result.shipped : [])
         setDraft(typeof result?.effectiveFolder === 'string' ? result.effectiveFolder : '')
       }
 
@@ -1048,7 +1088,9 @@ window.__ModuleLoader__.load({
           setMaximized(result?.settings?.startMaximized === true)
           setRandom(result?.settings?.random === true)
           setSound(result?.settings?.muted === false)
+          setSkip(typeof result?.settings?.skip === 'string' ? result.settings.skip : 'button')
           setLibrary(Array.isArray(result?.library) ? result.library : [])
+          setShipped(Array.isArray(result?.shipped) ? result.shipped : [])
           // The Host decides what the tick list should show: for an install from
           // before folders existed it derives it from the single legacy path, so
           // an upgrade does not look like the selection was lost.
@@ -1127,6 +1169,9 @@ window.__ModuleLoader__.load({
         setMaximized(next.startMaximized === true)
         setRandom(next.random === true)
         setSound(next.muted === false)
+        // Every save that carries a skip value mirrors it; the switch rows do not
+        // carry one, because the Host leaves an absent field alone.
+        if (typeof next.skip === 'string') setSkip(next.skip)
         setState({
           status: 'ready',
           media: result.media || { kind: 'none' },
@@ -1255,6 +1300,104 @@ window.__ModuleLoader__.load({
               ])
             })),
         React.createElement('div', { key: 'hint', style: { fontSize: '12px', opacity: 0.75, lineHeight: 1.6 } }, t.libraryHint),
+      ]))
+
+      // The shipped clips, in a group of their own and with NO tick boxes.
+      //
+      // They used to share the folder's list, which put two opposite meanings for
+      // "nothing ticked" — the folder's "play nothing" and the pool's "play
+      // everything" — under one heading that named only the folder. Ticking the one
+      // visible row (the opener) then silently locked the easter egg away for good,
+      // because a narrowed pool can never draw it and an undrawn egg is never
+      // listed. Showing them as information instead of as choices removes the trap.
+      if (shipped.length > 0) {
+        rows.push(React.createElement('div', {
+          key: 'shipped',
+          style: { display: 'flex', flexDirection: 'column', gap: '6px', marginTop: '16px' },
+        }, [
+          React.createElement('div', { key: 'head', style: { display: 'flex', alignItems: 'center', gap: '8px' } }, [
+            React.createElement('span', { key: 'label', style: { fontSize: '13px', fontWeight: 600 } }, t.shippedLabel),
+            React.createElement('span', { key: 'count', style: { fontSize: '12px', opacity: 0.7 } }, t.shippedCount(shipped.length)),
+          ]),
+          React.createElement('div', {
+            key: 'list',
+            style: {
+              display: 'flex',
+              flexDirection: 'column',
+              border: '1px solid rgba(128,128,128,.28)',
+              borderRadius: '8px',
+              padding: '4px',
+            },
+          }, shipped.map((entry) => React.createElement('div', {
+            key: entry.name,
+            style: {
+              display: 'flex',
+              alignItems: 'center',
+              gap: '8px',
+              padding: '6px 8px',
+              fontSize: '12.5px',
+            },
+          }, [
+            React.createElement('span', {
+              key: 'badge',
+              style: { opacity: 0.6, fontSize: '11.5px', whiteSpace: 'nowrap' },
+            }, entry.primary === true ? t.shippedOpener : t.shippedEgg),
+            React.createElement('span', { key: 'name', style: { flex: '1 1 auto', wordBreak: 'break-all' } }, entry.name),
+            React.createElement('span', { key: 'meta', style: { opacity: 0.65, fontSize: '11.5px', whiteSpace: 'nowrap' } },
+              `${entry.kind === 'image' ? t.kindImage : t.kindVideo} · ${humanBytes(entry.bytes)}`),
+          ]))),
+          React.createElement('div', { key: 'hint', style: { fontSize: '12px', opacity: 0.75, lineHeight: 1.6 } }, t.shippedHint),
+          // The optional third-party clips get a line here because this is the only
+          // place every install is guaranteed to show it: `postinstall` does not run
+          // for `link:` installs, and pnpm 10+ blocks dependency build scripts.
+          // tools/optional-media.mjs promises this row exists, so it has to exist.
+          React.createElement('div', {
+            key: 'optional',
+            style: { fontSize: '12px', opacity: 0.75, lineHeight: 1.6, marginTop: '2px' },
+          }, `${t.optionalLabel}：${t.optionalHint}`),
+        ]))
+      }
+
+      // `skip` is an enumeration, not a switch, so it gets a select rather than a
+      // box. It is the setting users notice first — the corner button versus
+      // clicking anywhere — and until now it had no control at all outside the
+      // profile's patch row.
+      rows.push(React.createElement('label', {
+        key: 'skip',
+        style: {
+          display: 'flex',
+          alignItems: 'center',
+          gap: '10px',
+          marginTop: '14px',
+          fontSize: '13px',
+          color: 'var(--dsw-alias-label-primary, #17181a)',
+        },
+      }, [
+        React.createElement('span', { key: 'label', style: { flex: '0 0 auto' } }, t.skipLabel),
+        React.createElement('select', {
+          key: 'value',
+          value: skip,
+          disabled: busy,
+          style: {
+            fontSize: '12.5px',
+            padding: '4px 6px',
+            borderRadius: '6px',
+            border: '1px solid rgba(128,128,128,.35)',
+            background: 'transparent',
+            color: 'inherit',
+          },
+          onChange: (event) => {
+            const value = event.target.value
+            setSkip(value)
+            void save(draft, { ...switches, skip: value })
+          },
+        }, [
+          React.createElement('option', { key: 'button', value: 'button' }, t.skipButton),
+          React.createElement('option', { key: 'click', value: 'click' }, t.skipClick),
+          React.createElement('option', { key: 'auto', value: 'auto' }, t.skipAuto),
+          React.createElement('option', { key: 'never', value: 'never' }, t.skipNever),
+        ]),
+        React.createElement('span', { key: 'hint', style: { fontSize: '12px', opacity: 0.7, lineHeight: 1.5 } }, t.skipHint),
       ]))
 
       rows.push(switchRow('sound', t.soundLabel, t.soundHint, sound, (next) => {
