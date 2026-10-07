@@ -1,6 +1,6 @@
 {
   "name": "dsh-splash-animation",
-  "version": "0.4.21-local.1",
+  "version": "0.5.0",
   "description": "DSH 开屏动画（KDDKBD/DeepSeek-splash-animation 的改动版）：指定一个素材文件夹，列出里面的视频与动图，打勾选择参与的那些并随机播放其中一个；一个都不打勾则不播放，DSH 直接启动。另加片尾交叉溶解、启动默认最大化（Windows）。",
   "keywords": [
     "dsh",
@@ -27,6 +27,7 @@
     "index.js",
     "client.js",
     "assets",
+    "media",
     "cordis.patch.yml",
     "icon.svg",
     "tools/pick-media-file.ps1",
@@ -34,7 +35,7 @@
     "README.md",
     "LICENSE"
   ],
-  "//": "tools/ 里只有这两个 .ps1 进包：宿主半在运行时按路径读取它们，分别用来弹原生文件对话框和从系统层面最大化窗口，漏掉任何一个都会让对应功能静默失效。其余 tools/ 是仓库自带的验证脚本，使用者不需要。",
+  "//": "tools/ 里只有这两个 .ps1 进包：宿主半在运行时按路径读取它们，分别用来弹原生文件对话框和从系统层面最大化窗口，漏掉任何一个都会让对应功能静默失效。其余 tools/ 是仓库自带的验证脚本，使用者不需要。media/ 进包约 30 MB —— 它是 README 里承诺的「开箱即用素材」，不进包的话那条承诺对安装版用户就不成立。",
   "icon": "./icon.svg",
   "scripts": {
     "verify": "node tools/verify-host.mjs && node tools/verify-routes.mjs && node tools/verify-contract.mjs && node tools/verify-install-docs.mjs && node tools/verify-package-contents.mjs",

@@ -128,7 +128,9 @@ check(typeof host.normalizeConfig === 'function', 'exports normalizeConfig()')
 check(host.DEFAULTS !== undefined, 'exports DEFAULTS')
 
 const documentedKeys = Object.keys(host.DEFAULTS).sort()
-check(documentedKeys.length === 14, '14 documented settings', String(documentedKeys.length))
+// 19, not the upstream 14: this fork added folder, selected, random, muted,
+// tailDissolve and startMaximized. Counted so a setting cannot be added silently.
+check(documentedKeys.length === 19, '19 documented settings', String(documentedKeys.length))
 check(
   !documentedKeys.includes('enabled'),
   'there is no enabled flag: the gate is whether a video is configured',
@@ -264,17 +266,17 @@ applying = true
 face.apply(ctx)
 applying = false
 
-check(injected.includes('settings.plugins.tab'), 'it always injects the settings tab, so a video can be chosen', JSON.stringify(injected))
+check(injected.includes('settings.section'), 'it always injects the settings tab, so a video can be chosen', JSON.stringify(injected))
 check(
-  registered.some((options) => options.name === 'settings.plugins.tab'),
+  registered.some((options) => options.name === 'settings.section'),
   'it registers the settings page',
 )
 check(
-  registered.find((options) => options.name === 'settings.plugins.tab')?.id === manifest.name,
+  registered.find((options) => options.name === 'settings.section')?.id === manifest.name,
   'the settings entry id is the package name',
 )
 check(
-  typeof registered.find((options) => options.name === 'settings.plugins.tab')?.label === 'function',
+  typeof registered.find((options) => options.name === 'settings.section')?.label === 'function',
   'the settings tab label is a thunk, so it follows the active locale',
 )
 

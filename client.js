@@ -163,6 +163,8 @@ window.__ModuleLoader__.load({
         reloadLibrary: '刷新',
         tailLabel: '片尾交叉溶解',
         tailHint: '开启后，淡出在影片结束前 fadeOutMs 就开始，影片还在演的时候界面已在下面透出来，交接正好落在最后一帧。关闭维持原样：整段播完、停在最后一帧，再淡出（两者之间可留 holdAfterEndMs）。影片设为重复播放时本项不生效，避免截断重播。',
+        soundLabel: '播放声音',
+        soundHint: '开启后开屏影片带声音播放。宿主本身并不限制自动播放带声音的媒体，所以这一项默认关闭只是插件自己的保守选择——打开就能出声。影片自己没有音轨时这项没有效果。',
         randomLabel: '随机播放',
         randomHint: '开启后，每次启动从上面的清单里随机挑一个。挑中的文件如果不存在、或者格式不支持，会自动跳过它换下一个，不会因为一条坏路径就不播；清单为空时等于关闭。',
         maximizedLabel: '启动默认最大化',
@@ -208,6 +210,8 @@ window.__ModuleLoader__.load({
         reloadLibrary: 'Refresh',
         tailLabel: 'Tail cross-dissolve',
         tailHint: 'On, the dissolve starts fadeOutMs before the clip ends, so the clip is still playing while the interface comes through underneath and the hand-off lands on the last frame. Off keeps the previous behaviour: the clip plays out in full, holds its last frame, then dissolves (holdAfterEndMs is the gap). Has no effect while the clip repeats, which would otherwise be cut short.',
+        soundLabel: 'Play sound',
+        soundHint: 'On, the splash clip plays with its audio. The host does not restrict autoplay of audible media, so off-by-default is this plugin\'s own conservative choice — turn it on and you will hear it. No effect when the clip has no audio track.',
         randomLabel: 'Play at random',
         randomHint: 'On, each start picks one entry from the list above. An entry that is missing or unsupported is skipped for the next one rather than stopping playback, and an empty list behaves as off.',
         maximizedLabel: 'Maximize on start-up',
@@ -316,6 +320,12 @@ window.__ModuleLoader__.load({
       tailDissolve: false,
       // Off: the window keeps whatever size and position the user left it at.
       startMaximized: false,
+      // The folder model. Listed here because this half reads and writes all
+      // three: it renders `effectiveFolder`/`effectiveSelected` from them and
+      // sends `folder`/`selected` back on every save.
+      random: false,
+      folder: '',
+      selected: [],
     }
 
     /** @returns `value` when it is a usable number, else `fallback`. */
@@ -994,11 +1004,19 @@ window.__ModuleLoader__.load({
       const [tail, setTail] = React.useState(false)
       const [maximized, setMaximized] = React.useState(false)
       const [random, setRandom] = React.useState(false)
+      /**
+       * Shown as 「播放声音」, stored as the Host's `muted`.
+       *
+       * The box is the positive form on purpose: a switch labelled 「静音」 that
+       * you turn ON to get silence reads backwards. The mapping to `muted` happens
+       * here and nowhere else.
+       */
+      const [sound, setSound] = React.useState(false)
       /** What the Host found in the folder: the only things that can be ticked. */
       const [library, setLibrary] = React.useState([])
-      /** Ticked file NAMES. Empty means "everything in the folder". */
+      /** Ticked file NAMES. Empty means "play nothing" — ticking is what makes a file eligible. */
       const [selected, setSelected] = React.useState([])
-      const switches = { tailDissolve: tail, startMaximized: maximized, random }
+      const switches = { tailDissolve: tail, startMaximized: maximized, random, muted: !sound }
       /** @returns the ticked names as the Host stores them. */
       const selectedNames = () => selected
 
@@ -1029,8 +1047,14 @@ window.__ModuleLoader__.load({
           setTail(result?.settings?.tailDissolve === true)
           setMaximized(result?.settings?.startMaximized === true)
           setRandom(result?.settings?.random === true)
+          setSound(result?.settings?.muted === false)
           setLibrary(Array.isArray(result?.library) ? result.library : [])
-          setSelected(Array.isArray(result?.settings?.selected) ? result.settings.selected : [])
+          // The Host decides what the tick list should show: for an install from
+          // before folders existed it derives it from the single legacy path, so
+          // an upgrade does not look like the selection was lost.
+          setSelected(Array.isArray(result?.effectiveSelected)
+            ? result.effectiveSelected
+            : (Array.isArray(result?.settings?.selected) ? result.settings.selected : []))
           setState({
             status: 'ready',
             media: (result && result.media) || { kind: 'none' },
@@ -1088,11 +1112,11 @@ window.__ModuleLoader__.load({
        */
       const save = async (value, next = switches) => {
         setBusy(true)
-        // The pool travels with every save for the same reason the switches do:
-        // a save that omitted it would look like an empty pool and wipe it.
-        // The single path is sent empty on purpose: a folder supersedes it, and
-        // leaving the old value behind would let it resurface as the fallback.
-        const result = await post(SAVE_URL, { src: '', folder: value, selected: selectedNames(), ...next })
+        // `src` is deliberately absent. The page no longer edits the single path —
+        // the folder replaced it — and the Host clears `src` itself once a folder
+        // is set. Sending `src: ''` on every save made a plain switch toggle look
+        // like a deliberate "stop playing", which switched the splash off for good.
+        const result = await post(SAVE_URL, { folder: value, selected: selectedNames(), ...next })
         setBusy(false)
         if (result.ok !== true) {
           setState((previous) => ({ ...previous, status: 'ready', problem: 'load-failed' }))
@@ -1102,6 +1126,7 @@ window.__ModuleLoader__.load({
         setTail(next.tailDissolve === true)
         setMaximized(next.startMaximized === true)
         setRandom(next.random === true)
+        setSound(next.muted === false)
         setState({
           status: 'ready',
           media: result.media || { kind: 'none' },
@@ -1231,6 +1256,12 @@ window.__ModuleLoader__.load({
             })),
         React.createElement('div', { key: 'hint', style: { fontSize: '12px', opacity: 0.75, lineHeight: 1.6 } }, t.libraryHint),
       ]))
+
+      rows.push(switchRow('sound', t.soundLabel, t.soundHint, sound, (next) => {
+        setSound(next)
+        // The box is 「播放声音」; the stored setting is the opposite.
+        void save(draft, { ...switches, muted: !next })
+      }))
 
       rows.push(switchRow('random', t.randomLabel, t.randomHint, random, (next) => {
         setRandom(next)

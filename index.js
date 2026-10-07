@@ -51,7 +51,7 @@ const PICK_ROUTE = `${ROUTE_BASE}/pick`
 const SPLASH_ROUTE = `${ROUTE_BASE}/splash`
 
 /** Boolean settings the settings page owns and the state file stores verbatim. */
-const SWITCH_KEYS = ['tailDissolve', 'startMaximized', 'random']
+const SWITCH_KEYS = ['tailDissolve', 'startMaximized', 'random', 'muted']
 
 /** Phases the browser half reports. Only `startup` is acted on, once per process. */
 const SPLASH_PHASES = ['startup']
@@ -125,8 +125,15 @@ function eligibleEntries(settings, dshHome) {
       .filter((entry) => ticked.includes(entry.name))
       .map((entry) => ({ root, name: entry.name, bytes: entry.bytes }))
   }
-  // No folder at all: the single path from before the folder existed, if any.
-  const single = resolveEffectiveMedia(settings?.src, dshHome)
+  // No folder: the single path from before the folder existed, if the user
+  // actually set one. The BUNDLED video is deliberately not an entry here — it is
+  // the fallback `resolveEffectiveMedia` applies when nothing is configured, and
+  // listing it would relabel it as a deliberate choice: `source` came back
+  // `chosen` instead of `bundled`, and the settings page lost the path it is
+  // meant to show for a never-configured install.
+  const raw = typeof settings?.src === 'string' ? settings.src.trim() : ''
+  if (raw === '') return []
+  const single = resolveMedia(raw, dshHome)
   if (single.configured === true && single.problem === undefined) {
     return [{ root: dirname(single.path), name: single.name, bytes: single.bytes }]
   }
@@ -177,10 +184,20 @@ export function pickEffectiveSource(settings, dshHome, pick = Math.random) {
  */
 export function resolveRequestedMedia(settings, dshHome, requested) {
   const hit = eligibleEntries(settings, dshHome).find((entry) => entry.name === requested)
-  if (hit === undefined) return undefined
-  const media = resolveEffectiveMedia(join(hit.root, hit.name), dshHome)
-  if (media.configured !== true || media.problem !== undefined) return undefined
-  return media
+  if (hit !== undefined) {
+    const media = resolveEffectiveMedia(join(hit.root, hit.name), dshHome)
+    if (media.configured !== true || media.problem !== undefined) return undefined
+    return media
+  }
+  // Nothing is configured at all, so the BUNDLED video is what the configuration
+  // route told the page to play — and it has to be servable too. The bundled
+  // video is deliberately not an eligible ENTRY (labelling it one made the page
+  // report "chosen" instead of "bundled"), but that distinction is about the
+  // label, not about who may be served. Missing this made a fresh install hand
+  // the page a URL the media route answered 404 for, i.e. no splash at all.
+  const announced = resolveEffectiveMedia(settings?.src, dshHome)
+  if (announced.source === 'bundled' && announced.name === requested) return announced
+  return undefined
 }
 
 /**
@@ -361,15 +378,16 @@ export function normalizeConfig(raw) {
   const background = typeof input.background === 'string' && /^#(?:[0-9a-f]{3}|[0-9a-f]{6})$/i.test(input.background)
     ? input.background
     : DEFAULTS.background
-  // An install from before the folder existed stores one path. Deriving the
-  // folder and the tick from it means the upgrade shows the user's own video,
-  // already ticked, instead of an empty page that looks like data loss.
-  const legacy = typeof input.src === 'string' ? input.src.trim() : ''
+  // No migration here. Deriving a folder from a legacy `src` is a DISPLAY concern
+  // (the upgrade should show the user's own video, already ticked, instead of an
+  // empty page that looks like data loss) and it is applied when the settings page
+  // is told what to show — see `legacyFolderView`.
+  //
+  // Doing it here instead meant `normalizeConfig` rewrote every legacy install into
+  // folder + tick, so a legacy path that no longer exists stopped being reported as
+  // "missing-file" and came back as "cleared" — the media route announced nothing,
+  // the page showed nothing, and there was no explanation anywhere.
   const declaredFolder = typeof input.folder === 'string' ? input.folder.trim() : ''
-  const migrated = declaredFolder === '' && legacy !== ''
-  const folder = migrated
-    ? folderFromLegacy(legacy)
-    : (declaredFolder === '' ? undefined : declaredFolder)
   return {
     // `undefined` is preserved, and it means "never chosen" — which is what lets a
     // bundled default apply. An empty string means "clear", i.e. never play.
@@ -390,10 +408,10 @@ export function normalizeConfig(raw) {
     tailDissolve: typeof input.tailDissolve === 'boolean' ? input.tailDissolve : DEFAULTS.tailDissolve,
     startMaximized: typeof input.startMaximized === 'boolean' ? input.startMaximized : DEFAULTS.startMaximized,
     random: typeof input.random === 'boolean' ? input.random : DEFAULTS.random,
-    folder,
-    selected: migrated
-      ? normalizeSelected([legacy.slice(Math.max(legacy.lastIndexOf('/'), legacy.lastIndexOf('\\')) + 1)])
-      : normalizeSelected(input.selected),
+    folder: declaredFolder === '' ? undefined : declaredFolder,
+    // The tick list is stored, never derived. `legacyFolderView` derives what to
+    // DISPLAY for an install that predates folders.
+    selected: normalizeSelected(input.selected),
   }
 }
 
@@ -417,6 +435,31 @@ function folderFromLegacy(legacy) {
   const bare = cut.replace(/[\\/]+$/, '')
   if (bare === '' || bare.endsWith(':')) return cut
   return bare
+}
+
+/**
+ * What the settings page should be shown for the folder and the tick list.
+ *
+ * An install from before folders existed stores one `src` path and no folder.
+ * Showing an empty folder field would look like the configuration was lost, so
+ * the page is handed the derived folder with that one file already ticked.
+ *
+ * This is deliberately a VIEW layered on top of the effective settings, not a
+ * rewrite of them. Folding it into `normalizeConfig` meant media resolution saw a
+ * folder too, so a legacy path that had gone missing produced an empty library and
+ * was reported as "cleared" — no media, no error, no explanation.
+ *
+ * @param effective - the normalized effective settings.
+ * @returns the folder and the tick list to display.
+ */
+export function legacyFolderView(effective) {
+  const declared = typeof effective?.folder === 'string' ? effective.folder.trim() : ''
+  if (declared !== '') {
+    return { folder: declared, selected: Array.isArray(effective?.selected) ? effective.selected : [] }
+  }
+  const legacy = typeof effective?.src === 'string' ? effective.src.trim() : ''
+  if (legacy === '') return { folder: '', selected: [] }
+  return { folder: folderFromLegacy(legacy) ?? '', selected: [basename(legacy)] }
 }
 
 /**
@@ -633,7 +676,11 @@ function writeState(dshHome, src, switches, extras) {
   mkdirSync(dir, { recursive: true })
   const file = stateFile(dshHome)
   const temporary = `${file}.tmp`
-  const next = { ...readState(dshHome), src }
+  const next = { ...readState(dshHome) }
+  // Only a string replaces the stored path. `undefined` means the request said
+  // nothing about it, and leaving it untouched is the whole point: see the save
+  // route for what conflating the two cost.
+  if (typeof src === 'string') next.src = src
   for (const key of SWITCH_KEYS) {
     if (typeof switches?.[key] === 'boolean') next[key] = switches[key]
   }
@@ -1141,8 +1188,16 @@ export function apply(ctx, rawConfig, options = {}) {
   const dshHome = process.env.DSH_HOME ?? join(homedir(), '.dsh')
   const patchConfig = normalizeConfig(rawConfig)
   const pick = options.picker ?? ((initial, mode) => pickMediaFile(ctx, initial, mode))
-  // The fullscreen controller is built per mount so a disposed plugin can still
-  // reach the one window it resized.
+  // Create the recommended media folder on the way up. The README tells users to
+  // keep their clips here, and the folder picker opens here — but a directory that
+  // does not exist is skipped by the dialog helper, which then silently falls back
+  // to whatever Windows last remembered. A fresh install therefore landed on
+  // Documents the first time anyone pressed the button.
+  try {
+    mkdirSync(defaultMediaDir(dshHome), { recursive: true })
+  } catch {
+    // A read-only home is not fatal: the folder is a convenience, not a requirement.
+  }
   const startMaximized = options.maximize ?? createStartMaximized({
     run: options.run,
     processName: options.processName,
@@ -1284,6 +1339,7 @@ export function apply(ctx, rawConfig, options = {}) {
         if (guard(req, res)) return
         const effective = settings()
         const media = resolveEffectiveMedia(pickEffectiveSource(effective, dshHome), dshHome)
+        const view = legacyFolderView(effective)
         res.writeHead(200, {
           'Content-Type': 'application/json; charset=utf-8',
           'Cache-Control': 'no-store',
@@ -1329,8 +1385,14 @@ export function apply(ctx, rawConfig, options = {}) {
            * add a way for the two to disagree.
            */
           library: listLibrary(effective.folder, dshHome),
-          /** The folder as the page should show it, after the legacy migration. */
-          effectiveFolder: effective.folder ?? '',
+          /**
+           * The folder and tick list as the page should show them.
+           *
+           * A view, not a rewrite: `effective` keeps the legacy `src` intact so a
+           * path that has gone missing is still reported as `missing-file`.
+           */
+          effectiveFolder: view.folder,
+          effectiveSelected: view.selected,
         }))
       },
     }))
@@ -1347,12 +1409,20 @@ export function apply(ctx, rawConfig, options = {}) {
           return
         }
         const body = await readJsonBody(req, 16 * 1024)
-        if (body === undefined || typeof body.src !== 'string') {
+        // A body without `src` is fine — the settings page no longer edits the
+        // single path. A body with a `src` that is not a string is malformed.
+        if (body === undefined || (body.src !== undefined && typeof body.src !== 'string')) {
           res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' })
           res.end(JSON.stringify({ ok: false, error: 'invalid-body' }))
           return
         }
-        const src = body.src.trim().slice(0, MAX_SRC_LENGTH)
+        // `src` is written ONLY when the body actually carries one. Absent means
+        // "this request says nothing about the single path", which is not the same
+        // as "clear it" — and conflating the two is what made the settings page
+        // destroy playback: every switch toggle sent `src: ''`, the Host stored a
+        // deliberate "cleared", and the splash went permanently silent with no way
+        // back through the UI.
+        const src = typeof body.src === 'string' ? body.src.trim().slice(0, MAX_SRC_LENGTH) : undefined
         // Optional: an older client sends only `src`, which must leave the stored
         // switches untouched rather than resetting them. Anything that is not a
         // boolean is dropped here, so a malformed body cannot store junk.

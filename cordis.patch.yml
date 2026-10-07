@@ -4,19 +4,22 @@
 # 本文件把开屏动画插件插入当前 profile 的配置树。
 #
 # 安装：
-#   dsh plugin --profile web add dsh-splash-animation
-# 或本地开发：
-#   dsh plugin --profile web add <本目录绝对路径>
+#   dsh plugin --profile <你的 profile> add github:tenebris173/DeepSeek-splash-animation
+# 或本地开发（用你 clone 下来的目录）：
+#   dsh plugin --profile <你的 profile> add <本目录绝对路径>
+#
+# 桌面版通常不需要写 --profile：它会自己决定用哪个 profile。
 #
 # 配置示例（覆盖行来改 config；只写想改的字段）：
 #   - id: dsh-splash-animation
 #     name: dsh-splash-animation
 #     config:
-#       src: D:/wallpapers/opening.webm
-#       skip: button
+#       folder: C:/Users/你/.dsh/dsh-splash-animation/media
+#       random: true
+#       skip: click
 #       muted: false
 #
-# 完整字段见 README.zh.md「配置」一节。
+# 完整字段见 README.md 的「配置」一节。
 
 - insert:
     - id: dsh-splash-animation

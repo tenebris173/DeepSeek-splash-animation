@@ -208,8 +208,10 @@ console.log('route registration')
 {
   const { routes } = mount()
   const paths = routes.map((route) => route.path).sort()
-  check(routes.length === 4, 'registers four routes', String(routes.length))
-  check(paths.includes(CONFIG) && paths.includes(SAVE) && paths.includes(PICK) && paths.includes(MEDIA), 'all four paths are the documented ones', paths.join(' '))
+  // Five, not four: this fork added the folder-picker route. Asserted by count so a
+  // route cannot appear or vanish unnoticed — update this with the route.
+  check(routes.length === 5, 'registers five routes', String(routes.length))
+  check(paths.includes(CONFIG) && paths.includes(SAVE) && paths.includes(PICK) && paths.includes(MEDIA), 'all the documented paths are present', paths.join(' '))
   check(routes.filter((route) => route.kind === 'prefix').length === 1, 'exactly one prefix route, so a sibling namespace cannot be swallowed')
   check(routeAt(routes, MEDIA).kind === 'prefix', 'the media route is the prefix route')
 }
