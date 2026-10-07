@@ -221,8 +221,7 @@ export function bundledClipEntries(dshHome) {
  * @returns entries shaped like `listLibrary`'s, plus `shipped` and `primary`.
  */
 export function shippedLibrary(dshHome) {
-  const unlocked = readState(dshHome).unlocked
-  const revealed = Array.isArray(unlocked) ? unlocked.filter((name) => typeof name === 'string') : []
+  const revealed = poolState(dshHome).revealed
   return bundledClipEntries(dshHome)
     .filter((entry) => entry.hidden !== true || revealed.includes(entry.name))
     .map((entry) => {
@@ -253,6 +252,34 @@ function samePath(a, b) {
   const right = resolve(b)
   if (left === right) return true
   return process.platform === 'win32' && left.toLowerCase() === right.toLowerCase()
+}
+
+/**
+ * What previous starts left behind about the shipped pool.
+ *
+ * Counters written by a version whose counting was unsound are DISCARDED rather
+ * than trusted. Before 0.6.0 there was no `openerPlays`, and the play count
+ * matched on file NAME alone — so a user's own copy of a shipped clip (which the
+ * README actively tells people to make) counted as a shipped play and could reveal
+ * the easter egg without the egg ever having been drawn.
+ *
+ * A state file that has plays but no `openerPlays` can only have come from those
+ * versions, so it is self-healing: the counters reset, the first start is the
+ * opener again, and the egg goes back to being genuinely hidden. Losing a count is
+ * cheap; a permanently mis-revealed egg is not.
+ *
+ * @param dshHome - absolute DSH home directory.
+ * @returns `{ plays, openerPlays, revealed }`.
+ */
+export function poolState(dshHome) {
+  const state = readState(dshHome)
+  const untrustworthy = Number(state.plays) > 0 && state.openerPlays === undefined
+  if (untrustworthy) return { plays: 0, openerPlays: 0, revealed: [] }
+  return {
+    plays: Number(state.plays) || 0,
+    openerPlays: Number(state.openerPlays) || 0,
+    revealed: Array.isArray(state.unlocked) ? state.unlocked.filter((name) => typeof name === 'string') : [],
+  }
 }
 
 /**
@@ -917,9 +944,11 @@ function recordBundledPlay(dshHome, media) {
   const openerPlays = Number.isInteger(state.openerPlays) && state.openerPlays >= 0 ? state.openerPlays : 0
   const stored = Array.isArray(state.unlocked) ? state.unlocked.filter((entry) => typeof entry === 'string') : []
   const patch = { plays: plays + 1 }
-  // Counted separately: the guarantee is "three starts of the OPENER, then the
-  // egg", and `plays` includes the egg itself once it has appeared.
-  if (clip.primary === true) patch.openerPlays = openerPlays + 1
+  // ALWAYS written, even when it does not go up. Its presence is what marks a
+  // state file as having been written by a version whose counting can be trusted;
+  // leaving it absent until the opener happens to play would make a perfectly good
+  // state file indistinguishable from the legacy one `poolState` discards.
+  patch.openerPlays = clip.primary === true ? openerPlays + 1 : openerPlays
   // Playing it IS the reveal: from here on the settings page lists it.
   if (clip.hidden === true && !stored.includes(name)) patch.unlocked = [...stored, name]
   try {
@@ -1527,15 +1556,10 @@ export function apply(ctx, rawConfig, options = {}) {
    * in terms of IT — "three starts of PRTS, then the whale" — and `plays` counts
    * every shipped serve, which is a different number the moment the egg appears.
    */
-  const pool = () => {
-    const state = readState(dshHome)
-    return {
-      entries: bundledClipEntries(dshHome),
-      plays: Number(state.plays) || 0,
-      openerPlays: Number(state.openerPlays) || 0,
-      revealed: Array.isArray(state.unlocked) ? state.unlocked.filter((name) => typeof name === 'string') : [],
-    }
-  }
+  const pool = () => ({
+    entries: bundledClipEntries(dshHome),
+    ...poolState(dshHome),
+  })
 
   // Suppress the shell's own boot layer while our splash owns the screen, and
   // cover the application until the splash has painted.
