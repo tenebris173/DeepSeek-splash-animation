@@ -201,7 +201,7 @@ window.__ModuleLoader__.load({
         size: '大小',
         summary: '影片信息',
         skip: '跳过',
-        skipClick: '点击任意位置跳过',
+        skipClickLong: '点击任意位置跳过',
         problem: {
           'unsupported-format': '这个扩展名不在支持列表里。',
           'missing-file': '找不到这个文件。',
@@ -210,6 +210,13 @@ window.__ModuleLoader__.load({
           'file-too-large': '文件超过 4 GiB 上限。',
           'codec-unsupported': '容器能读，但里面的编码格式当前 Electron 不支持，转码成 H.264 或 VP9 即可。',
           'load-failed': '读不到插件配置。',
+          'save-failed': '保存失败，改动没有生效。',
+          // A configured folder that yields nothing used to be reported as
+          // `cleared` — the same answer as a deliberate switch-off — so a typo in the
+          // path looked like "nothing configured" and gave the user nothing to act on.
+          'folder-missing': '这个素材文件夹不存在。检查一下路径，或者用「选择文件夹…」。',
+          'folder-empty': '这个文件夹里没有可播放的视频或动图。把文件放进去，再点「刷新」。',
+          'folder-not-a-directory': '这个路径是一个文件，不是文件夹。这一栏要填文件夹。',
         },
       },
       en: {
@@ -262,7 +269,7 @@ window.__ModuleLoader__.load({
         size: 'Size',
         summary: 'Media',
         skip: 'Skip',
-        skipClick: 'Click anywhere to skip',
+        skipClickLong: 'Click anywhere to skip',
         problem: {
           'unsupported-format': 'That extension is not in the supported list.',
           'missing-file': 'That file was not found.',
@@ -271,6 +278,12 @@ window.__ModuleLoader__.load({
           'file-too-large': 'The file exceeds the 4 GiB limit.',
           'codec-unsupported': 'The container is readable but the codec inside it is not supported by this Electron build. Transcode to H.264 or VP9.',
           'load-failed': 'The plugin configuration could not be read.',
+          'save-failed': 'Saving failed; nothing was changed.',
+          // See the zh table: a broken folder used to be reported as a deliberate
+          // switch-off, which left a typo looking like "nothing configured".
+          'folder-missing': 'That media folder does not exist. Check the path, or use Choose folder.',
+          'folder-empty': 'No playable video or image in this folder. Put files there and press Refresh.',
+          'folder-not-a-directory': 'That path is a file, not a folder. This field wants a folder.',
         },
       },
     }
@@ -745,6 +758,15 @@ window.__ModuleLoader__.load({
           element.addEventListener('loadedmetadata', armTail)
           element.addEventListener('durationchange', armTail)
 
+          // Metadata can already be there by the time those listeners are attached —
+          // a cached clip, or an element that raced ahead. Nothing would ever arm,
+          // the opaque cover would stay up until `ended`, and with `skip: 'never'`
+          // the user would have no way out of it at all.
+          if (element.readyState >= 1) {
+            armFallback()
+            armTail()
+          }
+
           const started = element.play()
           if (started !== undefined && typeof started.catch === 'function') {
             // Autoplay refused, or the codec failed after metadata. A muted retry
@@ -765,6 +787,15 @@ window.__ModuleLoader__.load({
                 element.currentTime = 0
                 const again = element.play()
                 if (again !== undefined && typeof again.catch === 'function') again.catch(() => dismiss())
+                // Re-arm the backstop for the passes still to come. It was armed for
+                // ONE pass by `armFallback`, and this branch used to return before
+                // cancelling it — so the timer fired in the middle of the second pass
+                // and dissolved the splash part-way through the repeats the user had
+                // asked for. `replayed` counts completed passes, so what remains is
+                // `maxReplays - replayed`, plus the pass now starting.
+                if (fadeTimer !== undefined) window.clearTimeout(fadeTimer)
+                const remaining = Math.max(1, settings.maxReplays - replayed + 1)
+                fadeTimer = after(fadeDelayFor(element.duration, settings) * remaining, dismiss)
                 return
               }
             }
@@ -832,11 +863,16 @@ window.__ModuleLoader__.load({
       }, [session, dismiss])
 
       React.useEffect(() => {
-        if (phase !== 'out') return undefined
+        // Guard on the session as well as the derived phase. `phase` still reads
+        // 'out' for the render in which the session has already become
+        // `{ phase: 'done' }`, and `session.settings` is then undefined — so the
+        // effect re-ran and scheduled a second, pointless timer for the fallback
+        // duration.
+        if (phase !== 'out' || session.phase !== 'out') return undefined
         const fade = num(session.settings && session.settings.fadeOutMs, FALLBACK.fadeOutMs)
         const id = window.setTimeout(() => setSession({ phase: 'done' }), fade)
         return () => window.clearTimeout(id)
-      }, [phase, session.settings])
+      }, [phase, session.phase, session.settings])
 
       if (session.phase === 'done') return null
 
@@ -967,7 +1003,7 @@ window.__ModuleLoader__.load({
             pointerEvents: clickOnly ? 'none' : 'auto',
             userSelect: 'none',
           },
-        }, clickOnly ? t.skipClick : t.skip))
+        }, clickOnly ? t.skipClickLong : t.skip))
       }
 
       return topLayer(React.createElement('div', {
@@ -1061,50 +1097,72 @@ window.__ModuleLoader__.load({
       /** @returns the ticked names as the Host stores them. */
       const selectedNames = () => selected
 
-      /** Re-read the folder listing and the effective folder from the Host. */
-      const refreshLibrary = async () => {
-        const result = await payload()
+      /**
+       * Fold one Host payload into the page state.
+       *
+       * @param result - the payload, possibly a failure shape.
+       * @param options - `{ keepDraft }` leaves the text box alone.
+       */
+      const apply = (result, options = {}) => {
+        // Only the FOLDER fills the text box.
+        //
+        // It used to fall back to `effectiveSrc`, which is a FILE path — and then
+        // any switch toggle sent that file as `folder`. A folder supersedes the
+        // single path, so the Host cleared `src` and the plugin was left with
+        // nothing to play: a plain toggle killed the splash while the page still said
+        // "saved". A legacy single path is not a folder and must never be typed into
+        // the folder field.
+        if (options.keepDraft !== true) {
+          setDraft(typeof result?.effectiveFolder === 'string' ? result.effectiveFolder : '')
+        }
+        // The switches come from the same merge the player uses (stored value over
+        // the profile's patch row), so the boxes show what will actually happen
+        // rather than what was last clicked.
+        setTail(result?.settings?.tailDissolve === true)
+        setMaximized(result?.settings?.startMaximized === true)
+        setRandom(result?.settings?.random === true)
+        setSound(result?.settings?.muted === false)
+        setSkip(typeof result?.settings?.skip === 'string' ? result.settings.skip : 'button')
         setLibrary(Array.isArray(result?.library) ? result.library : [])
         setShipped(Array.isArray(result?.shipped) ? result.shipped : [])
-        setDraft(typeof result?.effectiveFolder === 'string' ? result.effectiveFolder : '')
+        // The Host decides what the tick list should show: for an install from before
+        // folders existed it derives it from the single legacy path, so an upgrade
+        // does not look like the selection was lost.
+        setSelected(Array.isArray(result?.effectiveSelected)
+          ? result.effectiveSelected
+          : (Array.isArray(result?.settings?.selected) ? result.settings.selected : []))
+        setState({
+          status: 'ready',
+          media: (result && result.media) || { kind: 'none' },
+          problem: result?.problem ?? null,
+          source: (result && result.source) || null,
+        })
+      }
+
+      /**
+       * Re-read everything the page shows from the Host.
+       *
+       * One path, used for the first paint AND after every save. A save can change
+       * more than it carried: the Host clears the superseded `src`, and the file list
+       * belongs to the folder that was just stored. Mirroring only the values that
+       * were sent left the page showing the PREVIOUS folder's files, with their
+       * ticks, until the user found the Refresh button — and the count then read
+       * "1 of 2 ticked" while nothing at all was eligible, so the splash silently
+       * played nothing.
+       *
+       * @param options - `{ keepDraft }` leaves the text box alone.
+       * @returns the payload.
+       */
+      const load = async (options = {}) => {
+        const result = await payload()
+        apply(result, options)
+        return result
       }
 
       React.useEffect(() => {
         let cancelled = false
         payload().then((result) => {
-          if (cancelled) return
-          // `effectiveSrc` is what is actually playing right now, which for a
-          // never-configured install is the bundled video the Host resolved. Showing
-          // an empty field while that video plays would contradict the page's own
-          // status line, so the field follows the Host's answer.
-          const shown = typeof result?.effectiveSrc === 'string' && result.effectiveSrc !== ''
-            ? result.effectiveSrc
-            : (typeof result?.settings?.src === 'string' ? result.settings.src : '')
-          // The folder wins when there is one: the single path only exists as the
-          // fallback for an install that predates the folder.
-          setDraft(typeof result?.effectiveFolder === 'string' && result.effectiveFolder !== '' ? result.effectiveFolder : shown)
-          // The switches come from the same merge the player uses (stored value
-          // over the profile's patch row), so the boxes show what will actually
-          // happen rather than what was last clicked.
-          setTail(result?.settings?.tailDissolve === true)
-          setMaximized(result?.settings?.startMaximized === true)
-          setRandom(result?.settings?.random === true)
-          setSound(result?.settings?.muted === false)
-          setSkip(typeof result?.settings?.skip === 'string' ? result.settings.skip : 'button')
-          setLibrary(Array.isArray(result?.library) ? result.library : [])
-          setShipped(Array.isArray(result?.shipped) ? result.shipped : [])
-          // The Host decides what the tick list should show: for an install from
-          // before folders existed it derives it from the single legacy path, so
-          // an upgrade does not look like the selection was lost.
-          setSelected(Array.isArray(result?.effectiveSelected)
-            ? result.effectiveSelected
-            : (Array.isArray(result?.settings?.selected) ? result.settings.selected : []))
-          setState({
-            status: 'ready',
-            media: (result && result.media) || { kind: 'none' },
-            problem: (result && result.problem) || null,
-            source: (result && result.source) || null,
-          })
+          if (!cancelled) apply(result)
         })
         return () => {
           cancelled = true
@@ -1154,32 +1212,33 @@ window.__ModuleLoader__.load({
        * @param value - the path to store (`''` clears it).
        * @param next - the switch values; defaults to what the boxes show.
        */
-      const save = async (value, next = switches) => {
+      /**
+       * Persist a change, then re-read the Host's answer.
+       *
+       * `body` is exactly what to send, decided by the CALLER — the meaning of a
+       * request cannot be inferred from its values. `folder: ''` means both "nothing
+       * is configured yet" and "the user pressed 清除", and those two want opposite
+       * notices and different requests: a legacy install keeps its path in `src`, so
+       * only an explicit `src: ''` switches it off, while a switch toggle must send
+       * no `folder` at all.
+       *
+       * @param body - the JSON body to POST.
+       * @param notice - what to say on success; omit to say nothing.
+       */
+      const save = async (body, notice) => {
         setBusy(true)
-        // `src` is deliberately absent. The page no longer edits the single path —
-        // the folder replaced it — and the Host clears `src` itself once a folder
-        // is set. Sending `src: ''` on every save made a plain switch toggle look
-        // like a deliberate "stop playing", which switched the splash off for good.
-        const result = await post(SAVE_URL, { folder: value, selected: selectedNames(), ...next })
+        const result = await post(SAVE_URL, body)
         setBusy(false)
         if (result.ok !== true) {
-          setState((previous) => ({ ...previous, status: 'ready', problem: 'load-failed' }))
+          // The controls were flipped optimistically before this call. Put them back
+          // to what the Host actually holds, and report the WRITE — the old code left
+          // the box showing the new value and claimed it could not READ.
+          await load()
+          setState((previous) => ({ ...previous, problem: 'save-failed' }))
           return
         }
-        setDraft(value)
-        setTail(next.tailDissolve === true)
-        setMaximized(next.startMaximized === true)
-        setRandom(next.random === true)
-        setSound(next.muted === false)
-        // Every save that carries a skip value mirrors it; the switch rows do not
-        // carry one, because the Host leaves an absent field alone.
-        if (typeof next.skip === 'string') setSkip(next.skip)
-        setState({
-          status: 'ready',
-          media: result.media || { kind: 'none' },
-          problem: result.problem ?? null,
-          notice: value === '' ? t.cleared : t.saved,
-        })
+        await load()
+        if (notice !== undefined) setState((previous) => ({ ...previous, notice }))
       }
 
       const problemText = state.problem === 'picker-unavailable'
@@ -1209,7 +1268,7 @@ window.__ModuleLoader__.load({
             disabled: busy,
             onChange: (event) => setDraft(event.target.value),
             onKeyDown: (event) => {
-              if (event.key === 'Enter') void save(draft)
+                  if (event.key === 'Enter') void save({ folder: draft, selected: selectedNames() }, t.saved)
             },
             style: FIELD,
           }),
@@ -1259,7 +1318,14 @@ window.__ModuleLoader__.load({
           React.createElement('span', { key: 'label', style: { fontSize: '13px', fontWeight: 600 } }, t.libraryLabel),
           React.createElement('span', { key: 'count', style: { fontSize: '12px', opacity: 0.7 } }, t.libraryCount(selected.length, library.length)),
           React.createElement('span', { key: 'spacer', style: { flex: '1 1 auto' } }),
-          button({ key: 'reload', label: t.reloadLibrary, onClick: () => void refreshLibrary() }),
+          // Refreshing re-reads the folder WITHOUT touching the text box: the user
+          // may be half-way through typing a new path, and wiping it was a surprise.
+          button({
+            key: 'reload',
+            label: t.reloadLibrary,
+            onClick: () => void load({ keepDraft: true }),
+            disabled: busy,
+          }),
         ]),
         library.length === 0
           ? React.createElement('div', { key: 'empty', style: { fontSize: '12px', opacity: 0.75, lineHeight: 1.6 } }, t.libraryEmpty)
@@ -1292,9 +1358,20 @@ window.__ModuleLoader__.load({
                   key: 'tick',
                   type: 'checkbox',
                   checked: ticked,
-                  onChange: () => setSelected(ticked
-                    ? selected.filter((name) => name !== entry.name)
-                    : [...selected, entry.name]),
+                  // Locked while a save is in flight, like the switches: a tick made
+                  // during one would not be in that request and would never be sent.
+                  disabled: busy,
+                  onChange: () => {
+                    // Saved on the spot, like a switch. It used to only set local
+                    // state and ride along with the next unrelated save, so ticking a
+                    // file and reloading lost the tick — while the count cheerfully
+                    // read "1 ticked".
+                    const next = ticked
+                      ? selected.filter((name) => name !== entry.name)
+                      : [...selected, entry.name]
+                    setSelected(next)
+                    void save({ selected: next }, t.saved)
+                  },
                 }),
                 React.createElement('span', { key: 'name', style: { flex: '1 1 auto', wordBreak: 'break-all' } }, entry.name),
                 React.createElement('span', { key: 'meta', style: { opacity: 0.65, fontSize: '11.5px', whiteSpace: 'nowrap' } },
@@ -1394,7 +1471,7 @@ window.__ModuleLoader__.load({
           onChange: (event) => {
             const value = event.target.value
             setSkip(value)
-            void save(draft, { ...switches, skip: value })
+            void save({ ...switches, skip: value })
           },
         }, [
           React.createElement('option', { key: 'button', value: 'button' }, t.skipButton),
@@ -1408,31 +1485,45 @@ window.__ModuleLoader__.load({
       rows.push(switchRow('sound', t.soundLabel, t.soundHint, sound, (next) => {
         setSound(next)
         // The box is 「播放声音」; the stored setting is the opposite.
-        void save(draft, { ...switches, muted: !next })
+        void save({ ...switches, muted: !next })
       }))
 
       rows.push(switchRow('random', t.randomLabel, t.randomHint, random, (next) => {
         setRandom(next)
-        void save(draft, { ...switches, random: next })
+        void save({ ...switches, random: next })
       }))
 
       rows.push(switchRow('tail', t.tailLabel, t.tailHint, tail, (next) => {
         setTail(next)
-        void save(draft, { ...switches, tailDissolve: next })
+        void save({ ...switches, tailDissolve: next })
       }))
 
 
       rows.push(switchRow('maximized', t.maximizedLabel, t.maximizedHint, maximized, (next) => {
         setMaximized(next)
-        void save(draft, { ...switches, startMaximized: next })
+        void save({ ...switches, startMaximized: next })
       }))
 
       rows.push(React.createElement('div', {
         key: 'actions',
         style: { display: 'flex', gap: '8px', alignItems: 'center', marginTop: '12px' },
       }, [
-        button({ key: 'save', label: t.save, onClick: () => void save(draft), disabled: busy, primary: true }),
-        button({ key: 'clear', label: t.clear, onClick: () => void save(''), disabled: busy || draft === '' }),
+        button({
+          key: 'save',
+          label: t.save,
+          onClick: () => void save({ folder: draft, selected: selectedNames() }, t.saved),
+          disabled: busy,
+          primary: true,
+        }),
+        // 清除 is an explicit "stop playing", and it is the only caller that says so.
+        // It must send `src: ''` as well: a legacy install stores its path there, and
+        // clearing the folder alone left it playing with no way to switch it off.
+        button({
+          key: 'clear',
+          label: t.clear,
+          onClick: () => void save({ src: '', folder: '', selected: [] }, t.cleared),
+          disabled: busy,
+        }),
       ]))
 
       if (state.status === 'picking') {

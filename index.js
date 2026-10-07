@@ -720,13 +720,19 @@ function folderFromLegacy(legacy) {
  * @param effective - the normalized effective settings.
  * @returns the folder and the tick list to display.
  */
-export function legacyFolderView(effective) {
+export function legacyFolderView(effective, library) {
   const declared = typeof effective?.folder === 'string' ? effective.folder.trim() : ''
-  if (declared !== '') {
-    return { folder: declared, selected: Array.isArray(effective?.selected) ? effective.selected : [] }
-  }
+  const ticked = Array.isArray(effective?.selected) ? effective.selected : []
+  // Ticks are names, and names belong to a folder. After the folder is changed, the
+  // stored list still holds the OLD folder's file names — reporting them would draw
+  // ticks next to files that are not there, and the count would read "1 of 2 ticked"
+  // while nothing at all is eligible. The stored list is left alone; only the view
+  // is narrowed to names the current folder actually has.
+  const present = Array.isArray(library) ? new Set(library.map((entry) => entry.name)) : undefined
+  const visible = present === undefined ? ticked : ticked.filter((name) => present.has(name))
+  if (declared !== '') return { folder: declared, selected: visible }
   const legacy = typeof effective?.src === 'string' ? effective.src.trim() : ''
-  if (legacy === '') return { folder: '', selected: [] }
+  if (legacy === '') return { folder: '', selected: visible }
   return { folder: folderFromLegacy(legacy) ?? '', selected: [basename(legacy)] }
 }
 
@@ -968,6 +974,84 @@ function recordBundledPlay(dshHome, media) {
 }
 
 /**
+ * Why a configured folder yields nothing, when it is not simply "you ticked none".
+ *
+ * A folder that is missing, is a file, or holds no playable media used to be
+ * reported as `cleared` — the same answer as "the user deliberately switched the
+ * splash off" — so the page said "not configured, the plugin stays out of the way"
+ * and gave the user nothing to act on. Ticking none of a folder that DOES have
+ * playable files stays silent: that one really is a choice.
+ *
+ * @param effective - the normalized effective settings.
+ * @param library - the playable files already listed for this folder.
+ * @param dshHome - absolute DSH home directory.
+ * @returns a problem code, or `undefined` when there is nothing to report.
+ */
+function folderProblem(effective, library, dshHome) {
+  const folder = typeof effective?.folder === 'string' ? effective.folder.trim() : ''
+  if (folder === '') return undefined
+  if (Array.isArray(library) && library.length > 0) return undefined
+  let stats
+  try {
+    stats = statSync(toAbsolutePath(folder, dshHome))
+  } catch {
+    return 'folder-missing'
+  }
+  return stats.isDirectory() ? 'folder-empty' : 'folder-not-a-directory'
+}
+
+/**
+ * Does this request START a whole playback, as opposed to probing or continuing one?
+ *
+ * The pool's counters spend the first-start rule and the easter egg, so they are
+ * incremented per playback, not per request:
+ *
+ *   - HEAD never plays anything;
+ *   - a revalidation (`If-None-Match` / `If-Modified-Since`) sends no body at all;
+ *   - a ranged request continues a playback that was already counted, and only a
+ *     range that starts at 0 can be the start of one;
+ *   - a SHORT first range is a probe, not a stream, so it does not count either —
+ *     but a large one does, because that is how some clients start, and refusing
+ *     those would leave the counters stuck at zero and the guarantee unreachable.
+ *
+ * @param method - the request method.
+ * @param headers - the request headers.
+ * @returns true when this request begins a playback.
+ */
+function startsPlayback(method, headers) {
+  if (method === 'HEAD') return false
+  if (headers?.['if-none-match'] !== undefined || headers?.['if-modified-since'] !== undefined) return false
+  const range = headers?.range
+  if (typeof range !== 'string') return true
+  const match = /^bytes=0-(\d+)?\s*$/.exec(range.trim())
+  if (match === null) return false
+  if (match[1] === undefined) return true
+  return Number(match[1]) >= PROBE_RANGE_BYTES
+}
+
+/** A first range shorter than this is treated as a probe rather than a stream. */
+const PROBE_RANGE_BYTES = 65536
+
+/**
+ * Is this configured folder an existing FILE rather than a directory?
+ *
+ * Used to refuse storing one: see `writeState` for what a file-as-folder costs.
+ * A path that cannot be stat-ed is not a file, so a folder the user is about to
+ * create still passes.
+ *
+ * @param folder - the configured folder, as sent.
+ * @param dshHome - absolute DSH home directory.
+ * @returns true when the path exists and is not a directory.
+ */
+function isExistingFile(folder, dshHome) {
+  try {
+    return statSync(toAbsolutePath(folder, dshHome)).isFile()
+  } catch {
+    return false
+  }
+}
+
+/**
  * Write the state file atomically, replacing only the keys given.
  *
  * @param dshHome - absolute DSH home directory.
@@ -1010,15 +1094,28 @@ function writeState(dshHome, src, switches, extras) {
   // Folder and selection are written only when the caller sent them, for the
   // same reason the switches are: a client that predates the feature must not
   // wipe the configuration it does not know about.
-  if (typeof extras?.folder === 'string') next.folder = extras.folder.trim().slice(0, MAX_SRC_LENGTH)
+  //
+  // A "folder" that is really a FILE is refused outright. Storing one is
+  // destructive: a folder supersedes the single path, so `src` is cleared below and
+  // the plugin is then left with nothing to play — a plain switch toggle silently
+  // killed playback while the page still said "saved". The settings page could
+  // produce exactly that whenever the stored single path was relative (`clip.mp4`),
+  // because the folder it derives from that path IS the file.
+  //
+  // A path that does not exist is still accepted: the user may be about to create
+  // it, and refusing would be surprising. Only an existing non-directory is refused.
+  const folder = typeof extras?.folder === 'string' ? extras.folder.trim().slice(0, MAX_SRC_LENGTH) : undefined
+  const folderUsable = folder !== undefined && (folder === '' || !isExistingFile(folder, dshHome))
+  if (folder !== undefined && folderUsable) next.folder = folder
   if (Array.isArray(extras?.selected)) next.selected = normalizeSelected(extras.selected)
   // Enumerated settings the page can change, validated HERE rather than trusted:
   // `normalizeConfig` would coerce a bad value back to the default on read, which
   // would leave junk sitting in the file and the page showing something else.
   if (typeof extras?.skip === 'string' && SKIP_MODES.has(extras.skip)) next.skip = extras.skip
   // A folder supersedes the single path: leaving the old one behind would let it
-  // reappear as the fallback if the folder is later emptied.
-  if (typeof extras?.folder === 'string' && extras.folder.trim() !== '') next.src = ''
+  // reappear as the fallback if the folder is later emptied. Only when a folder was
+  // actually stored — refusing one must not also destroy the path it failed on.
+  if (folder !== undefined && folder !== '' && folderUsable) next.src = ''
   writeFileSync(temporary, `${JSON.stringify(next, null, 2)}\n`, 'utf8')
   renameSync(temporary, file)
 }
@@ -1324,7 +1421,7 @@ async function pickMediaFile(ctx, initial, mode = 'file') {
  * @param initial - starting path.
  * @returns the path, `''` for a cancel, or `undefined` when Electron is absent.
  */
-async function pickViaElectron(initial) {
+async function pickViaElectron(initial, mode = 'file') {
   if (process.versions.electron === undefined && process.type === undefined) return undefined
   let dialog
   try {
@@ -1335,16 +1432,23 @@ async function pickViaElectron(initial) {
     return undefined
   }
   if (dialog === undefined || typeof dialog.showOpenDialog !== 'function') return undefined
+  // `mode` is honoured here too. It used to be dropped on the floor, so on a host
+  // that CAN resolve electron the folder button would have opened a file dialog —
+  // unreachable today (the desktop host runs this half with ELECTRON_RUN_AS_NODE=1,
+  // where `require('electron')` fails), but wrong the moment it stops being so.
+  const folder = mode === 'folder'
   try {
     const result = await dialog.showOpenDialog({
       title: 'Select a video or animated image for the DSH splash',
-      properties: ['openFile'],
+      properties: folder ? ['openDirectory'] : ['openFile'],
       defaultPath: initial === '' ? undefined : initial,
-      filters: [
-        { name: 'All supported media', extensions: [...Object.keys(FORMATS)] },
-        { name: 'Video', extensions: Object.keys(FORMATS).filter((extension) => !IMAGE_KIND.has(extension)) },
-        { name: 'Animated / still image', extensions: [...IMAGE_KIND] },
-      ],
+      filters: folder
+        ? undefined
+        : [
+            { name: 'All supported media', extensions: [...Object.keys(FORMATS)] },
+            { name: 'Video', extensions: Object.keys(FORMATS).filter((extension) => !IMAGE_KIND.has(extension)) },
+            { name: 'Animated / still image', extensions: [...IMAGE_KIND] },
+          ],
     })
     if (result.canceled === true || !Array.isArray(result.filePaths) || result.filePaths.length === 0) return ''
     return result.filePaths[0]
@@ -1555,6 +1659,83 @@ export function apply(ctx, rawConfig, options = {}) {
    * settings page is picked up by the next page load without restarting DSH.
    * @returns the merged, normalized configuration.
    */
+  /**
+   * The configuration payload BOTH routes answer with.
+   *
+   * One builder, because both carry the same `version` and the page parses them with
+   * one code path. The save route used to answer with a different shape — raw stored
+   * keys rather than normalized settings, an `effectiveSrc` that vanished when the
+   * request carried no `src` (JSON drops undefined), and `chosen` hard-wired true —
+   * so "the answer right after saving" and "the answer after a reload" disagreed.
+   *
+   * @param effective - the normalized effective settings.
+   * @param media - the resolved descriptor, already labelled.
+   * @returns the payload.
+   */
+  const describe = (effective, media) => {
+    const library = listLibrary(effective.folder, dshHome)
+    const view = legacyFolderView(effective, library)
+    return {
+      version: 4,
+      settings: effective,
+      // `configured: false` is the signal to the browser half to stay out of the
+      // way entirely — no overlay, no card, nothing.
+      media: media.configured !== true
+        ? { kind: 'none' }
+        : media.problem === undefined
+          ? {
+              url: `${MEDIA_ROUTE}/${encodeURIComponent(media.name)}`,
+              name: media.name,
+              kind: media.kind,
+              mime: media.mime,
+              extension: media.extension,
+              bytes: media.bytes,
+            }
+          : { kind: 'none', name: media.name, extension: media.extension },
+      // A broken folder reports WHY. It used to come back as `cleared` — the same
+      // answer as a deliberate switch-off — so a typo in the path looked like
+      // "nothing configured" and gave the user nothing to act on.
+      problem: media.problem ?? folderProblem(effective, library, dshHome) ?? null,
+      /** Which rule chose the media: `shipped`, `bundled`, `chosen`, `cleared` or `unset`. */
+      source: media.source ?? null,
+      /**
+       * The single path the page may show, for an install from before folders.
+       *
+       * Always a string, so the key never disappears from the JSON.
+       */
+      effectiveSrc: media.source === 'bundled'
+        ? BUNDLED_MEDIA
+        : (media.source === 'chosen' && media.configured === true ? (effective.src ?? '') : ''),
+      /** True once the user has chosen (or explicitly cleared) something. */
+      chosen: media.source === 'chosen' || media.source === 'cleared',
+      /**
+       * What the settings page lists: the playable files in the folder.
+       *
+       * Sent with the configuration rather than from a route of its own — the page
+       * already fetches this one, and a second round trip would only add a way for
+       * the two to disagree.
+       */
+      library,
+      /**
+       * The clips the package ships, listed separately and NOT tickable.
+       *
+       * They used to be merged into `library`, which made one list carry two
+       * opposite meanings for "nothing ticked" — the folder's ("play nothing") and
+       * the pool's ("play everything") — under a heading that named only the folder.
+       * Splitting them is what removes the contradiction.
+       */
+      shipped: shippedLibrary(dshHome),
+      /**
+       * The folder and tick list as the page should show them.
+       *
+       * A view, not a rewrite: `effective` keeps the legacy `src` intact so a path
+       * that has gone missing is still reported as `missing-file`.
+       */
+      effectiveFolder: view.folder,
+      effectiveSelected: view.selected,
+    }
+  }
+
   const settings = () => {
     const stored = readState(dshHome)
     const merged = { ...patchConfig }
@@ -1700,70 +1881,11 @@ export function apply(ctx, rawConfig, options = {}) {
         if (guard(req, res)) return
         const effective = settings()
         const media = labelShipped(resolveEffectiveMedia(pickEffectiveSource(effective, dshHome, Math.random, pool()), dshHome), dshHome)
-        const view = legacyFolderView(effective)
         res.writeHead(200, {
           'Content-Type': 'application/json; charset=utf-8',
           'Cache-Control': 'no-store',
         })
-        res.end(JSON.stringify({
-          version: 4,
-          settings: effective,
-          // `configured: false` is the signal to the browser half to stay out of
-          // the way entirely — no overlay, no card, nothing.
-          media: media.configured !== true
-            ? { kind: 'none' }
-            : media.problem === undefined
-              ? {
-                  url: `${MEDIA_ROUTE}/${encodeURIComponent(media.name)}`,
-                  name: media.name,
-                  kind: media.kind,
-                  mime: media.mime,
-                  extension: media.extension,
-                  bytes: media.bytes,
-                }
-              : { kind: 'none', name: media.name, extension: media.extension },
-          problem: media.problem ?? null,
-          /** Which rule chose the media: `bundled`, `chosen`, `cleared` or `unset`. */
-          source: media.source ?? null,
-          /**
-           * What the settings page should show in its path field.
-           *
-           * A never-chosen install still plays the bundled video, so the field is
-           * prefilled with that path — the page shows what is actually playing
-           * rather than an empty box that contradicts it. Saving clears the
-           * `bundled` source, which is what "the user has now chosen" means.
-           */
-          effectiveSrc: media.source === 'bundled'
-            ? BUNDLED_MEDIA
-            : (media.source === 'chosen' && media.configured === true ? (effective.src ?? '') : ''),
-          /** True once the user has chosen (or explicitly cleared) something. */
-          chosen: media.source === 'chosen' || media.source === 'cleared',
-          /**
-           * What the settings page lists: the playable files in the folder.
-           *
-           * Sent with the configuration rather than from a route of its own —
-           * the page already fetches this one, and a second round trip would only
-           * add a way for the two to disagree.
-           */
-          library: listLibrary(effective.folder, dshHome),
-          /**
-           * The clips the package ships, listed separately and NOT tickable.
-           *
-           * They used to be merged into `library`, which made one list carry two
-           * opposite meanings for "nothing ticked" — the folder's ("play nothing")
-           * and the pool's ("play everything") — under a heading that named only
-           * the folder. Splitting them is what removes the contradiction.
-           */
-          shipped: shippedLibrary(dshHome),
-          /**
-           * The folder and tick list as the page should show them.
-           *
-           * A view, not a rewrite: `effective` keeps the legacy `src` intact so a
-           * path that has gone missing is still reported as `missing-file`.
-           */
-          effectiveFolder: view.folder,
-          effectiveSelected: view.selected,
-        }))
+        res.end(JSON.stringify(describe(effective, media)))
       },
     }))
 
@@ -1811,29 +1933,17 @@ export function apply(ctx, rawConfig, options = {}) {
         // Saving — including saving an empty path — records an explicit choice, so
         // the bundled default no longer applies afterwards. That is what makes
         // "clear it and it stops playing" true.
-        const media = labelShipped(resolveEffectiveMedia(pickEffectiveSource(settings(), dshHome, Math.random, pool()), dshHome), dshHome)
+        //
+        // The payload is the SAME one the configuration route answers with: both
+        // carry `version: 4` and the page parses them with one code path, so a
+        // different shape here meant "just after saving" disagreed with "after a
+        // reload" — raw stored keys instead of normalized settings, an
+        // `effectiveSrc` that vanished when the request carried no `src`, and
+        // `chosen` hard-wired true.
+        const effective = settings()
+        const media = labelShipped(resolveEffectiveMedia(pickEffectiveSource(effective, dshHome, Math.random, pool()), dshHome), dshHome)
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' })
-        res.end(JSON.stringify({
-          ok: true,
-          // The same wire version as the config route: the settings page consumes
-          // both responses with one parser.
-          version: 4,
-          settings: { ...patchConfig, ...readState(dshHome) },
-          media: media.configured !== true || media.problem !== undefined
-            ? { kind: 'none', name: media.name, extension: media.extension }
-            : {
-                url: `${MEDIA_ROUTE}/${encodeURIComponent(media.name)}`,
-                name: media.name,
-                kind: media.kind,
-                mime: media.mime,
-                extension: media.extension,
-                bytes: media.bytes,
-              },
-          problem: media.problem ?? null,
-          source: media.source ?? null,
-          effectiveSrc: media.configured === true ? src : '',
-          chosen: true,
-        }))
+        res.end(JSON.stringify({ ok: true, ...describe(effective, media) }))
       },
     }))
 
@@ -1946,20 +2056,28 @@ export function apply(ctx, rawConfig, options = {}) {
         // from, so whatever it announced as `media.url` is exactly what is served
         // here. Checking `settings().src` instead was a 404 on every start once
         // the folder took over.
-        const media = resolveRequestedMedia(settings(), dshHome, requested)
+        const routeSettings = settings()
+        const media = resolveRequestedMedia(routeSettings, dshHome, requested)
         if (media === undefined) {
           notFound(res)
           return
         }
-        // Count the play here, not in the configuration route: serving the bytes
-        // is the only proof the clip really played, and the settings page reads
-        // the configuration too. A ranged request continues a playback that has
-        // already been counted, so only a fresh one (no Range, or one starting at
-        // byte 0) counts — and a HEAD counts for nothing, because a HEAD never
-        // plays anything and a probe must not spend the first-start slot.
-        const range = req.headers?.range
-        const fresh = req.method !== 'HEAD' && (typeof range !== 'string' || /^bytes=0-/.test(range.trim()))
-        if (fresh) recordBundledPlay(dshHome, media)
+        // Count the play here, not in the configuration route: serving the bytes is
+        // the only proof the clip really played, and the settings page reads the
+        // configuration too.
+        //
+        // But a "play" is narrower than "a request", because these counters spend
+        // the first-start rule and the easter egg:
+        //   - it only counts while the POOL is what plays. Any client may fetch a
+        //     shipped clip's bytes — the route must serve what was announced and a
+        //     stale page may still ask — yet a clip the configuration route never
+        //     announced must not reveal the egg;
+        //   - HEAD, a revalidation, and a short probe range are not playbacks.
+        const routeFolder = typeof routeSettings?.folder === 'string' ? routeSettings.folder.trim() : ''
+        const poolActive = routeFolder === '' && typeof routeSettings?.src !== 'string'
+        if (poolActive && startsPlayback(req.method, req.headers)) {
+          recordBundledPlay(dshHome, media)
+        }
         serveMedia(req, res, media)
       },
     }))
