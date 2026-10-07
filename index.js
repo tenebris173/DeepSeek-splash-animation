@@ -94,6 +94,15 @@ const BUNDLED_CLIPS = [
 const BUNDLED_CLIP_DIR = join(PACKAGE_DIR, 'media')
 
 /**
+ * How many times the opener plays before a hidden clip is guaranteed.
+ *
+ * Three starts of the opener, then the fourth is the easter egg. The point is the
+ * guarantee, not the scheduling: the egg may still be drawn earlier by `random`,
+ * and this is simply the start after which it can no longer be missed.
+ */
+const OPENER_RUN = 3
+
+/**
  * The media that should play, honouring the three-state `src` rule.
  *
  * Order of precedence:
@@ -314,21 +323,32 @@ function drawFrom(entries, random, pick) {
 /**
  * Draw from the shipped pool.
  *
- * The first splash of an install is always the opener, so the very first
- * impression is deliberate. After that the pool is drawn normally — **including
- * any hidden clip**, which is what lets the easter egg appear before it is ever
- * listed in the settings page.
+ * Three rules, in order:
+ *
+ *   1. The first splash of an install is always the opener, so the very first
+ *      impression is deliberate rather than a coin toss.
+ *   2. Once the opener has had its run (see `OPENER_RUN`), an unseen hidden clip
+ *      is forced. Without this the easter egg is only *probable*: with `random`
+ *      off it would never arrive at all, and with it on a coin can keep landing
+ *      on the opener forever. "You might see it" is not an easter egg — "you will
+ *      see it on the fourth start" is.
+ *   3. Otherwise the pool is drawn normally, **including any hidden clip** — which
+ *      is what lets the egg be found earlier than the guarantee.
  *
  * @param entries - the shipped clips that resolve.
  * @param random - the `random` setting.
  * @param pick - random source, injectable for tests.
- * @param plays - how many times a shipped clip has been served before.
+ * @param state - `{ plays, openerPlays, revealed }` from previous serves.
  * @returns the chosen entry, or `undefined` when the pool is empty.
  */
-function drawFromPool(entries, random, pick, plays) {
+function drawFromPool(entries, random, pick, state) {
   if (entries.length === 0) return undefined
   const opener = entries.find((entry) => entry.primary === true) ?? entries[0]
+  const plays = Number(state?.plays) || 0
   if (plays <= 0) return opener
+  const revealed = Array.isArray(state?.revealed) ? state.revealed : []
+  const unseen = entries.filter((entry) => entry.hidden === true && !revealed.includes(entry.name))
+  if (unseen.length > 0 && (Number(state?.openerPlays) || 0) >= OPENER_RUN) return unseen[0]
   return drawFrom(entries, random, pick)
 }
 
@@ -371,7 +391,7 @@ export function pickEffectiveSource(settings, dshHome, pick = Math.random, pool 
       narrowed.length > 0 ? narrowed : shipped,
       settings?.random,
       pick,
-      Number(pool?.plays) || 0,
+      pool,
     )
     if (chosen !== undefined) return join(chosen.root, chosen.name)
   }
@@ -894,8 +914,12 @@ function recordBundledPlay(dshHome, media) {
   if (clip === undefined) return
   const state = readState(dshHome)
   const plays = Number.isInteger(state.plays) && state.plays >= 0 ? state.plays : 0
+  const openerPlays = Number.isInteger(state.openerPlays) && state.openerPlays >= 0 ? state.openerPlays : 0
   const stored = Array.isArray(state.unlocked) ? state.unlocked.filter((entry) => typeof entry === 'string') : []
   const patch = { plays: plays + 1 }
+  // Counted separately: the guarantee is "three starts of the OPENER, then the
+  // egg", and `plays` includes the egg itself once it has appeared.
+  if (clip.primary === true) patch.openerPlays = openerPlays + 1
   // Playing it IS the reveal: from here on the settings page lists it.
   if (clip.hidden === true && !stored.includes(name)) patch.unlocked = [...stored, name]
   try {
@@ -1464,6 +1488,17 @@ export function apply(ctx, rawConfig, options = {}) {
     run: options.run,
     processName: options.processName,
   })
+  // Say once, at the only moment it is useful, that the plugin ships nothing it
+  // did not make. `postinstall` prints the same thing, but pnpm 10+ blocks
+  // dependency build scripts unless they are approved, so relying on that alone
+  // would mean most users never hear about the optional clips.
+  // Optional call: `info` is not part of the logger contract this plugin already
+  // relies on (`warn` is), and a throw here would take the whole mount down — a
+  // missing notice is not worth failing to load over.
+  ctx.logger?.info?.(
+    'dsh-splash-animation: 自带 3 段自制二创（PRTS ×2、普鲸 ×1）。另有 3 段第三方开机动画（作者 lxj5820，MIT，'
+    + 'https://github.com/lxj5820/dsh-boot-animation）默认不安装 —— 想要就运行 node tools/optional-media.mjs --fetch。',
+  )
 
   /**
    * Effective settings: patch row, then the settings-page file on top.
@@ -1482,16 +1517,25 @@ export function apply(ctx, rawConfig, options = {}) {
   }
 
   /**
-   * The shipped pool, plus how many times it has been served.
+   * The shipped pool, plus what previous starts have left behind.
    *
    * Read per request for the same reason `settings()` is: a page load has to see
-   * the count the previous splash left behind, or the opener would play forever
-   * and the pool would never be drawn.
+   * the counts the previous splash wrote, or the opener would play forever and the
+   * pool would never be drawn.
+   *
+   * `openerPlays` counts the opener specifically, because the guarantee is worded
+   * in terms of IT — "three starts of PRTS, then the whale" — and `plays` counts
+   * every shipped serve, which is a different number the moment the egg appears.
    */
-  const pool = () => ({
-    entries: bundledClipEntries(dshHome),
-    plays: Number(readState(dshHome).plays) || 0,
-  })
+  const pool = () => {
+    const state = readState(dshHome)
+    return {
+      entries: bundledClipEntries(dshHome),
+      plays: Number(state.plays) || 0,
+      openerPlays: Number(state.openerPlays) || 0,
+      revealed: Array.isArray(state.unlocked) ? state.unlocked.filter((name) => typeof name === 'string') : [],
+    }
+  }
 
   // Suppress the shell's own boot layer while our splash owns the screen, and
   // cover the application until the splash has painted.
