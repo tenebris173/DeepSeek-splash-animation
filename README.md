@@ -249,6 +249,51 @@ dsh plugin --profile <你的 profile> add github:tenebris173/DeepSeek-splash-ani
 
 ---
 
+## 引用与署名
+
+如果你在别处介绍、转载或再分发这个改进版，这一节说明哪些是**必须保留**的、哪些是**可以直接抄**的写法。
+
+### 必须保留的
+
+MIT 的硬性要求只有一条：**保留版权声明与许可全文**。
+
+- 仓库里的 [`LICENSE`](LICENSE) **原样保留**。其中 `Copyright (c) 2025 dsh-splash-animation contributors` 是**上游的**版权行，不要改成自己的名字。
+- 源码里标注来源的注释不要删。
+
+MIT **不要求**你在帖子里致谢——但这是惯例，也是这个项目该有的样子。
+
+### 可以直接抄的署名
+
+**一句话版**（贴在链接旁边）：
+
+```
+基于 KDDKBD/DeepSeek-splash-animation（MIT）改造
+原项目：https://github.com/KDDKBD/DeepSeek-splash-animation
+```
+
+**完整版**（放在帖子开头或结尾）：
+
+```
+本插件基于 KDDKBD 的 DeepSeek-splash-animation 改造。
+  原项目：https://github.com/KDDKBD/DeepSeek-splash-animation  (MIT)
+  改进版：https://github.com/tenebris173/DeepSeek-splash-animation
+
+原插件的框架、客户端模块形态、媒体解析与 Range 流式传输、以及自带的那段
+默认视频，都来自 KDDKBD。本改进版在此基础上加了素材文件夹 + 打勾选择 +
+随机播放、片尾交叉溶解、启动默认最大化（Windows）。
+
+另有参考：lxj5820/dsh-boot-animation（MIT），改造时对照过它的做法。
+```
+
+### 请不要写成
+
+- ❌「我做了个开屏动画插件」——容易被读成原创。写「基于 XXX 的改进版 / fork」。
+- ❌「与原作者合作 / 获得认可」——没有这回事。
+
+**本改进版由本仓库维护者负责，与 KDDKBD 及上游贡献者无从属关系，也不代表其认可。**
+
+---
+
 ## 许可
 
 [MIT](LICENSE)，与上游一致。原版权声明保留：
@@ -258,3 +303,5 @@ MIT License
 
 Copyright (c) 2025 dsh-splash-animation contributors
 ```
+
+**注意：MIT 只覆盖代码。** `media/` 下的二创素材不在此列，见[素材声明](#素材声明)。
