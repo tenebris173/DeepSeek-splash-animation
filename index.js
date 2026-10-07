@@ -939,18 +939,19 @@ function recordBundledPlay(dshHome, media) {
   const name = media.name
   const clip = BUNDLED_CLIPS.find((entry) => entry.name === name)
   if (clip === undefined) return
-  const state = readState(dshHome)
-  const plays = Number.isInteger(state.plays) && state.plays >= 0 ? state.plays : 0
-  const openerPlays = Number.isInteger(state.openerPlays) && state.openerPlays >= 0 ? state.openerPlays : 0
-  const stored = Array.isArray(state.unlocked) ? state.unlocked.filter((entry) => typeof entry === 'string') : []
+  // Read through `poolState`, NOT `readState`. Reading the raw file here would
+  // recompute from the very counters `poolState` just rejected and write them
+  // straight back, so the untrustworthy reveal would survive every future start.
+  const { plays, openerPlays, revealed } = poolState(dshHome)
   const patch = { plays: plays + 1 }
   // ALWAYS written, even when it does not go up. Its presence is what marks a
   // state file as having been written by a version whose counting can be trusted;
   // leaving it absent until the opener happens to play would make a perfectly good
   // state file indistinguishable from the legacy one `poolState` discards.
   patch.openerPlays = clip.primary === true ? openerPlays + 1 : openerPlays
-  // Playing it IS the reveal: from here on the settings page lists it.
-  if (clip.hidden === true && !stored.includes(name)) patch.unlocked = [...stored, name]
+  // Written unconditionally for the same reason: a file that carried a rejected
+  // reveal list is repaired in place on the first serve rather than keeping it.
+  patch.unlocked = clip.hidden === true && !revealed.includes(name) ? [...revealed, name] : revealed
   try {
     patchState(dshHome, patch)
   } catch {
