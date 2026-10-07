@@ -3,13 +3,13 @@ Maximise the DSH window from outside the application.
 
 Why this is not an Electron call: the plugin Host runs as a plain Node child
 process (`desktopNodeEnvironment` sets `ELECTRON_RUN_AS_NODE=1`), so it has no
-`BrowserWindow` — the windows belong to the Electron main process. The desktop
+`BrowserWindow` -- the windows belong to the Electron main process. The desktop
 shell exposes no IPC that changes window geometry either. A Win32 call from the
 Host's own PowerShell is the only route left, and it is the same mechanism
 `tools/pick-media-file.ps1` already uses to reach a native dialog.
 
 Prints exactly one word on stdout, which is the whole result contract:
-  none       no window found yet — the caller may retry on a later page load
+  none       no window found yet -- the caller may retry on a later page load
   already    the window was maximised already; nothing was changed
   maximized  this call maximised it
   refused    the call was made but the window did not end up maximised

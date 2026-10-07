@@ -233,6 +233,10 @@ export function shippedLibrary(dshHome) {
         bytes: entry.bytes,
         shipped: true,
         primary: entry.primary === true,
+        // Sent as well, because `primary` alone cannot describe three roles: a clip
+        // that is neither the opener nor the egg would otherwise be labelled as one
+        // of them by any client that only had those two words to choose from.
+        hidden: entry.hidden === true,
       }
     })
 }
@@ -1944,11 +1948,11 @@ export function apply(ctx, rawConfig, options = {}) {
         // is the only proof the clip really played, and the settings page reads
         // the configuration too. A ranged request continues a playback that has
         // already been counted, so only a fresh one (no Range, or one starting at
-        // byte 0) counts.
+        // byte 0) counts — and a HEAD counts for nothing, because a HEAD never
+        // plays anything and a probe must not spend the first-start slot.
         const range = req.headers?.range
-        if (typeof range !== 'string' || /^bytes=0-/.test(range.trim())) {
-          recordBundledPlay(dshHome, media)
-        }
+        const fresh = req.method !== 'HEAD' && (typeof range !== 'string' || /^bytes=0-/.test(range.trim()))
+        if (fresh) recordBundledPlay(dshHome, media)
         serveMedia(req, res, media)
       },
     }))

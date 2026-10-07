@@ -104,11 +104,13 @@ $DSH_HOME/dsh-splash-animation/media/
 | `startMaximized` | `false` | 启动时最大化窗口（仅 Windows） |
 | `skip` | `button` | `button` / `click` / `auto` / `never`，见下 |
 | `skipAfterMs` | `1200` | `skip: auto` 时多久自动跳过 |
+| `volume` | `0.6` | 音量，`0`–`1`。只在 `muted: false` 时有意义 |
+| `waitForAppMs` | `2500` | 最多等应用多久再开始播（毫秒）。等不到就照播，不会卡住 |
 | `src` | 未设置 | 旧版的单一路径。一旦配了 `folder` 就会被清空——文件夹取代它 |
 
 > **设置页能改的**：素材文件夹与勾选、随机播放、片尾交叉溶解、启动时最大化、播放声音、**跳过方式**。
 >
-> **只能在 profile 的 `cordis.patch.yml` patch 行里改的**：`skipAfterMs`、`fadeInMs`、`fadeOutMs`、`holdAfterEndMs`、`playbackRate`、`fit`、`background`、`maxReplays`、`duration`。设置页没有这些控件。
+> **只能在 profile 的 `cordis.patch.yml` patch 行里改的**：`skipAfterMs`、`volume`、`waitForAppMs`、`fadeInMs`、`fadeOutMs`、`holdAfterEndMs`、`playbackRate`、`fit`、`background`、`maxReplays`、`duration`。设置页没有这些控件。
 
 ### 跳过方式
 

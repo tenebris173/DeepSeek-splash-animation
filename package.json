@@ -1,6 +1,6 @@
 {
   "name": "dsh-splash-animation",
-  "version": "0.7.0",
+  "version": "0.7.1",
   "description": "DSH 开屏动画（KDDKBD/DeepSeek-splash-animation 的改动版）：指定一个素材文件夹，列出里面的视频与动图，打勾选择参与的那些并随机播放其中一个；一个都不打勾则不播放，DSH 直接启动。另加片尾交叉溶解、启动默认最大化（Windows）。",
   "keywords": [
     "dsh",

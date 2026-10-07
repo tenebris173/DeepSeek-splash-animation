@@ -164,6 +164,7 @@ window.__ModuleLoader__.load({
         shippedCount: (total) => `${total} 段 · 自动参与，不用勾选`,
         shippedOpener: '开场片',
         shippedEgg: '彩蛋',
+        shippedSpare: '备用',
         shippedHint: '这几段随插件提供，和上面的勾选无关：第一次开屏必定是开场片，开场片播满 3 次后第 4 次必定是彩蛋，之后回到随机。彩蛋在播过一次之前不会出现在这里——你能在清单里看到它，说明你已经在屏幕上见过它了。',
         optionalLabel: '可选素材',
         optionalHint: '另有 3 段第三方开机动画（作者 lxj5820，MIT 许可，来源 github.com/lxj5820/dsh-boot-animation）默认不安装。在插件目录运行 node tools/optional-media.mjs --fetch 下载，直接取自原作者的仓库。',
@@ -224,6 +225,7 @@ window.__ModuleLoader__.load({
         shippedCount: (total) => `${total} · always in the draw, no ticking needed`,
         shippedOpener: 'opener',
         shippedEgg: 'easter egg',
+        shippedSpare: 'spare',
         shippedHint: 'These come with the plugin and are unaffected by the ticks above: the first start is always the opener, the fourth is always the egg once the opener has had three starts, and it is random after that. The egg is not listed here until it has played — seeing it in this list means you have already seen it on screen.',
         optionalLabel: 'Optional clips',
         optionalHint: 'Three more boot animations (by lxj5820, MIT, github.com/lxj5820/dsh-boot-animation) are deliberately not installed. Run node tools/optional-media.mjs --fetch in the plugin directory; the download comes straight from the author repository.',
@@ -1203,7 +1205,7 @@ window.__ModuleLoader__.load({
             type: 'text',
             value: draft,
             spellCheck: false,
-            placeholder: t.pathPlaceholder,
+            placeholder: t.folderPlaceholder,
             disabled: busy,
             onChange: (event) => setDraft(event.target.value),
             onKeyDown: (event) => {
@@ -1341,22 +1343,25 @@ window.__ModuleLoader__.load({
             React.createElement('span', {
               key: 'badge',
               style: { opacity: 0.6, fontSize: '11.5px', whiteSpace: 'nowrap' },
-            }, entry.primary === true ? t.shippedOpener : t.shippedEgg),
+            }, entry.primary === true ? t.shippedOpener : (entry.hidden === true ? t.shippedEgg : t.shippedSpare)),
             React.createElement('span', { key: 'name', style: { flex: '1 1 auto', wordBreak: 'break-all' } }, entry.name),
             React.createElement('span', { key: 'meta', style: { opacity: 0.65, fontSize: '11.5px', whiteSpace: 'nowrap' } },
               `${entry.kind === 'image' ? t.kindImage : t.kindVideo} · ${humanBytes(entry.bytes)}`),
           ]))),
           React.createElement('div', { key: 'hint', style: { fontSize: '12px', opacity: 0.75, lineHeight: 1.6 } }, t.shippedHint),
-          // The optional third-party clips get a line here because this is the only
-          // place every install is guaranteed to show it: `postinstall` does not run
-          // for `link:` installs, and pnpm 10+ blocks dependency build scripts.
-          // tools/optional-media.mjs promises this row exists, so it has to exist.
-          React.createElement('div', {
-            key: 'optional',
-            style: { fontSize: '12px', opacity: 0.75, lineHeight: 1.6, marginTop: '2px' },
-          }, `${t.optionalLabel}：${t.optionalHint}`),
         ]))
       }
+
+      // The optional third-party clips get a line of their own, OUTSIDE the shipped
+      // group above: whether the package happens to contain its own clips has
+      // nothing to do with the third-party ones, and this is the only place every
+      // install is guaranteed to show the notice — `postinstall` does not run for
+      // `link:` installs, and pnpm 10+ blocks dependency build scripts.
+      // tools/optional-media.mjs promises this row exists, so it has to exist.
+      rows.push(React.createElement('div', {
+        key: 'optional',
+        style: { fontSize: '12px', opacity: 0.75, lineHeight: 1.6, marginTop: '16px' },
+      }, `${t.optionalLabel}：${t.optionalHint}`))
 
       // `skip` is an enumeration, not a switch, so it gets a select rather than a
       // box. It is the setting users notice first — the corner button versus
