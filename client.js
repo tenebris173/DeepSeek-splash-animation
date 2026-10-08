@@ -388,6 +388,18 @@ window.__ModuleLoader__.load({
      */
     const FALLBACK_SLACK_MS = 5000
 
+    /**
+     * How much later than the dissolve the unconditional rescue timer fires.
+     *
+     * The dissolve timer is the one that normally unmounts the splash; this is the
+     * margin by which the floor under it waits before taking over. It only has to
+     * be long enough that the healthy path always wins the race — a second is
+     * several orders of magnitude more than the commit that separates them, and
+     * the cost of waiting is invisible (the splash is already fully transparent by
+     * then).
+     */
+    const RESCUE_GRACE_MS = 1000
+
     /** Rescue timeout when a video never reports a length at all. */
     const UNKNOWN_LENGTH_TIMEOUT_MS = 120000
 
@@ -586,18 +598,44 @@ window.__ModuleLoader__.load({
         payload().then((result) => {
           if (cancelled) return
           const settings = { ...FALLBACK, ...((result && result.settings) || {}) }
-          setSession({ phase: 'ready', settings, media: (result && result.media) || { kind: 'none' } })
+          const media = (result && result.media) || { kind: 'none' }
+          // Only a session that is still LOADING may be promoted to 'ready'.
+          //
+          // A dismissal can beat this reply: the user clicks (or presses Escape)
+          // to skip while the settings are still in flight. Rebuilding the session
+          // as 'ready' would then move it BACKWARD out of 'out' — and since the
+          // unmount effect requires `session.phase === 'out'`, the fade timer
+          // would be cancelled and never re-armed. Same unclickable dead end as
+          // advancing only `phase`, reached through a race instead of a typo.
+          // The freshly-arrived settings are still worth recording: the media
+          // element may already be on screen, and the settings page reads them.
+          setSession((current) => (current.phase === 'loading'
+            ? { phase: 'ready', settings, media }
+            : { ...current, settings, media }))
         })
         return () => {
           cancelled = true
         }
       }, [])
 
-      /** One-way dismissal: the first caller wins, later callers are no-ops. */
+      /**
+       * One-way dismissal: the first caller wins, later callers are no-ops.
+       *
+       * BOTH states advance. `phase` is the derived one the overlay interpolates
+       * with; `session.phase` is the one the unmount effect gates on. Advancing
+       * only the former left the session parked on 'ready' forever: the fade timer
+       * was never armed, `'done'` was never reached, and the overlay — invisible,
+       * `pointer-events: auto`, `inset: 0` — stayed mounted with its window-level
+       * capture listeners installed, stopping every pointer event before it
+       * reached the application. The interface rendered normally and could not be
+       * clicked, with no error anywhere. Nothing else in this file ever writes
+       * `'out'`, so this call is the only thing that closes that gate.
+       */
       const dismiss = React.useCallback(() => {
         if (dismissedRef.current) return
         dismissedRef.current = true
         setPhase('out')
+        setSession((current) => (current.phase === 'done' ? current : { ...current, phase: 'out' }))
       }, [])
 
       /**
@@ -870,9 +908,38 @@ window.__ModuleLoader__.load({
         // `{ phase: 'done' }`, and `session.settings` is then undefined — so the
         // effect re-ran and scheduled a second, pointless timer for the fallback
         // duration.
+        //
+        // This guard is only sound because `dismiss()` advances `session.phase`
+        // too. It was added in 0.8.0 without that half, which made it a condition
+        // that could never hold: no timer, no 'done', no unmount, no input.
         if (phase !== 'out' || session.phase !== 'out') return undefined
         const fade = num(session.settings && session.settings.fadeOutMs, FALLBACK.fadeOutMs)
         const id = window.setTimeout(() => setSession({ phase: 'done' }), fade)
+        return () => window.clearTimeout(id)
+      }, [phase, session.phase, session.settings])
+
+      /**
+       * The floor under the whole lifecycle: a dismissal always ends in 'done'.
+       *
+       * Everything above is a state machine whose only job is to get from 'out' to
+       * 'done', and 0.8.0/0.8.1 shipped with it broken. The cost of that bug was
+       * not a wrong pixel: the overlay stayed mounted — invisible, full-viewport,
+       * `pointer-events: auto` — with its window-level capture listeners still
+       * installed, so every click in the application was stopped at `window`
+       * before reaching anything. The interface rendered perfectly and was
+       * completely dead, with nothing in any log.
+       *
+       * So the escape hatch is deliberately NOT conditioned on the session. If the
+       * derived phase says the splash is leaving, this timer guarantees it leaves,
+       * whatever the rest of the state machine believes. It is a no-op on the
+       * healthy path: reaching 'done' clears it before it can fire, so the normal
+       * dismissal still arms exactly one timer. It only ever decides anything once
+       * everything else has already failed.
+       */
+      React.useEffect(() => {
+        if (phase !== 'out' || session.phase === 'done') return undefined
+        const fade = num(session.settings && session.settings.fadeOutMs, FALLBACK.fadeOutMs)
+        const id = window.setTimeout(() => setSession({ phase: 'done' }), fade + RESCUE_GRACE_MS)
         return () => window.clearTimeout(id)
       }, [phase, session.phase, session.settings])
 
